@@ -12,23 +12,8 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Check if version already published
-        id: check
-        run: |
-          VERSION=$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/mcp2cli/$VERSION/json")
-          if [ "$STATUS" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Version $VERSION already exists on PyPI, skipping publish"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Version $VERSION not found on PyPI, will publish"
-          fi
+      - run: uv build
 
-      - if: steps.check.outputs.skip == 'false'
-        run: uv build
-
-      - if: steps.check.outputs.skip == 'false'
-        run: uv publish
+      - run: uv publish
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
