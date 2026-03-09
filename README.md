@@ -71,6 +71,31 @@ mcp2cli --mcp https://mcp.example.com/sse --oauth --oauth-scope "read write" --l
 Tokens are persisted in `~/.cache/mcp2cli/oauth/` so subsequent calls reuse existing tokens
 and refresh automatically when they expire.
 
+### Secrets from environment or files
+
+Sensitive values (`--auth-header` values, `--oauth-client-id`, `--oauth-client-secret`) support
+`env:` and `file:` prefixes to avoid passing secrets as CLI arguments (which are visible in
+process listings):
+
+```bash
+# Read from environment variable
+mcp2cli --mcp https://mcp.example.com/sse \
+  --auth-header "Authorization:env:MY_API_TOKEN" \
+  --list
+
+# Read from file
+mcp2cli --mcp https://mcp.example.com/sse \
+  --oauth-client-secret "file:/run/secrets/client_secret" \
+  --oauth-client-id "my-client-id" \
+  --list
+
+# Works with secret managers that inject env vars
+fnox exec -- mcp2cli --mcp https://mcp.example.com/sse \
+  --oauth-client-id "env:OAUTH_CLIENT_ID" \
+  --oauth-client-secret "env:OAUTH_CLIENT_SECRET" \
+  --list
+```
+
 ### MCP stdio mode
 
 ```bash

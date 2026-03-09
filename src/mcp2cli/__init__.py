@@ -64,6 +64,30 @@ class CommandDef:
 # ---------------------------------------------------------------------------
 
 
+def resolve_secret(value: str) -> str:
+    """Resolve a secret value from env var, file, or literal.
+
+    Supports:
+      env:VAR_NAME   — read from environment variable
+      file:/path     — read from file (trailing newline stripped)
+      literal value  — returned as-is
+    """
+    if value.startswith("env:"):
+        var = value[4:]
+        resolved = os.environ.get(var)
+        if resolved is None:
+            print(f"Error: environment variable {var!r} is not set", file=sys.stderr)
+            sys.exit(1)
+        return resolved
+    if value.startswith("file:"):
+        path = Path(value[5:])
+        if not path.exists():
+            print(f"Error: secret file not found: {path}", file=sys.stderr)
+            sys.exit(1)
+        return path.read_text().rstrip("\n")
+    return value
+
+
 def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
     t = schema.get("type")
     if t == "integer":
@@ -1020,7 +1044,7 @@ def main():
         "--auth-header",
         action="append",
         default=[],
-        help="HTTP header as Name:Value (repeatable)",
+        help="HTTP header as Name:Value (repeatable). Value supports env:VAR and file:/path prefixes",
     )
     pre.add_argument("--base-url", default=None, help="Override base URL from spec")
     pre.add_argument("--cache-key", default=None, help="Custom cache key")
@@ -1059,12 +1083,12 @@ def main():
     pre.add_argument(
         "--oauth-client-id",
         default=None,
-        help="OAuth client ID (enables client credentials flow when used with --oauth-client-secret)",
+        help="OAuth client ID — supports env:VAR and file:/path prefixes",
     )
     pre.add_argument(
         "--oauth-client-secret",
         default=None,
-        help="OAuth client secret (enables client credentials flow when used with --oauth-client-id)",
+        help="OAuth client secret — supports env:VAR and file:/path prefixes",
     )
     pre.add_argument(
         "--oauth-scope",
@@ -1075,14 +1099,14 @@ def main():
 
     pre_args, remaining = pre.parse_known_args()
 
-    # Parse auth headers
+    # Parse auth headers (values support env: and file: prefixes)
     auth_headers: list[tuple[str, str]] = []
     for h in pre_args.auth_header:
         if ":" not in h:
             print(f"Error: invalid auth header format: {h!r} (expected Name:Value)", file=sys.stderr)
             sys.exit(1)
         name, value = h.split(":", 1)
-        auth_headers.append((name.strip(), value.strip()))
+        auth_headers.append((name.strip(), resolve_secret(value.strip())))
 
     # Parse env vars
     env_vars: dict[str, str] = {}
@@ -1119,10 +1143,12 @@ def main():
         if not pre_args.mcp:
             print("Error: OAuth is only supported with --mcp (HTTP/SSE)", file=sys.stderr)
             sys.exit(1)
+        client_id = resolve_secret(pre_args.oauth_client_id) if pre_args.oauth_client_id else None
+        client_secret = resolve_secret(pre_args.oauth_client_secret) if pre_args.oauth_client_secret else None
         oauth_provider = build_oauth_provider(
             pre_args.mcp,
-            client_id=pre_args.oauth_client_id,
-            client_secret=pre_args.oauth_client_secret,
+            client_id=client_id,
+            client_secret=client_secret,
             scope=pre_args.oauth_scope,
         )
 

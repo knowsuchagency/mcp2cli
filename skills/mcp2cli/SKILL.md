@@ -50,12 +50,12 @@ Source (mutually exclusive, one required):
   --mcp-stdio CMD       MCP server command (stdio transport)
 
 Options:
-  --auth-header K:V       HTTP header sent with requests (repeatable)
+  --auth-header K:V       HTTP header (repeatable, value supports env:/file: prefixes)
   --base-url URL          Override base URL from spec
   --env KEY=VALUE         Env var for stdio server process (repeatable)
   --oauth                 Enable OAuth (authorization code + PKCE flow)
-  --oauth-client-id ID    OAuth client ID (for client credentials flow)
-  --oauth-client-secret S OAuth client secret (for client credentials flow)
+  --oauth-client-id ID    OAuth client ID (supports env:/file: prefixes)
+  --oauth-client-secret S OAuth client secret (supports env:/file: prefixes)
   --oauth-scope SCOPE     OAuth scope(s) to request
   --cache-key KEY         Custom cache key
   --cache-ttl SECONDS     Cache TTL (default: 3600)
@@ -74,13 +74,17 @@ Subcommands and flags are generated dynamically from the source.
 ### Authentication
 
 ```bash
-# API key header
+# API key header (literal value)
 mcp2cli --spec ./spec.json --auth-header "Authorization:Bearer tok_..." list-items
 
-# Multiple headers
+# Secret from environment variable (avoids exposing in process list)
 mcp2cli --mcp https://mcp.example.com/sse \
-  --auth-header "x-api-key:sk-..." \
-  --auth-header "x-org-id:org_123" \
+  --auth-header "Authorization:env:API_TOKEN" \
+  search --query "test"
+
+# Secret from file
+mcp2cli --mcp https://mcp.example.com/sse \
+  --auth-header "x-api-key:file:/run/secrets/api_key" \
   search --query "test"
 ```
 

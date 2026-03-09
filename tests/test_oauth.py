@@ -1,6 +1,7 @@
 """Tests for OAuth support."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,36 @@ from pathlib import Path
 import pytest
 
 import mcp2cli
+
+
+class TestResolveSecret:
+    """Tests for resolve_secret helper."""
+
+    def test_literal_value(self):
+        assert mcp2cli.resolve_secret("my-secret") == "my-secret"
+
+    def test_env_prefix(self, monkeypatch):
+        monkeypatch.setenv("TEST_SECRET_VAR", "from-env")
+        assert mcp2cli.resolve_secret("env:TEST_SECRET_VAR") == "from-env"
+
+    def test_env_prefix_missing_var(self, monkeypatch):
+        monkeypatch.delenv("NONEXISTENT_VAR_12345", raising=False)
+        with pytest.raises(SystemExit):
+            mcp2cli.resolve_secret("env:NONEXISTENT_VAR_12345")
+
+    def test_file_prefix(self, tmp_path):
+        secret_file = tmp_path / "secret.txt"
+        secret_file.write_text("file-secret\n")
+        assert mcp2cli.resolve_secret(f"file:{secret_file}") == "file-secret"
+
+    def test_file_prefix_missing_file(self):
+        with pytest.raises(SystemExit):
+            mcp2cli.resolve_secret("file:/nonexistent/path/secret.txt")
+
+    def test_file_prefix_strips_trailing_newline(self, tmp_path):
+        secret_file = tmp_path / "secret.txt"
+        secret_file.write_text("no-newline")
+        assert mcp2cli.resolve_secret(f"file:{secret_file}") == "no-newline"
 
 
 class TestFileTokenStorage:
@@ -137,6 +168,31 @@ class TestOAuthCLIValidation:
         assert "--oauth-client-id" in r.stdout
         assert "--oauth-client-secret" in r.stdout
         assert "--oauth-scope" in r.stdout
+
+    def test_env_secret_in_client_id(self):
+        """--oauth-client-id env:VAR should resolve from environment."""
+        env = {**os.environ, "MCP2CLI_TEST_ID": "resolved-id"}
+        cmd = [
+            sys.executable, "-m", "mcp2cli",
+            "--mcp", "https://example.com/mcp",
+            "--oauth-client-id", "env:MCP2CLI_TEST_ID",
+            "--oauth-client-secret", "literal-secret",
+            "--list",
+        ]
+        # Will fail to connect but should not error on secret resolution
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=env)
+        # Should NOT contain "environment variable" error
+        assert "environment variable" not in r.stderr
+
+    def test_env_secret_missing_var_errors(self):
+        r = self._run(
+            "--mcp", "https://example.com/mcp",
+            "--oauth-client-id", "env:NONEXISTENT_VAR_99999",
+            "--oauth-client-secret", "secret",
+            "--list",
+        )
+        assert r.returncode != 0
+        assert "NONEXISTENT_VAR_99999" in r.stderr
 
 
 class TestCallbackHandler:
