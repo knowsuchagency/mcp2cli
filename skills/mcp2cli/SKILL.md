@@ -50,17 +50,21 @@ Source (mutually exclusive, one required):
   --mcp-stdio CMD       MCP server command (stdio transport)
 
 Options:
-  --auth-header K:V     HTTP header sent with requests (repeatable)
-  --base-url URL        Override base URL from spec
-  --env KEY=VALUE       Env var for stdio server process (repeatable)
-  --cache-key KEY       Custom cache key
-  --cache-ttl SECONDS   Cache TTL (default: 3600)
-  --refresh             Bypass cache
-  --list                List available subcommands
-  --pretty              Pretty-print JSON output
-  --raw                 Print raw response body
-  --toon                Encode output as TOON (token-efficient for LLMs)
-  --version             Show version
+  --auth-header K:V       HTTP header sent with requests (repeatable)
+  --base-url URL          Override base URL from spec
+  --env KEY=VALUE         Env var for stdio server process (repeatable)
+  --oauth                 Enable OAuth (authorization code + PKCE flow)
+  --oauth-client-id ID    OAuth client ID (for client credentials flow)
+  --oauth-client-secret S OAuth client secret (for client credentials flow)
+  --oauth-scope SCOPE     OAuth scope(s) to request
+  --cache-key KEY         Custom cache key
+  --cache-ttl SECONDS     Cache TTL (default: 3600)
+  --refresh               Bypass cache
+  --list                  List available subcommands
+  --pretty                Pretty-print JSON output
+  --raw                   Print raw response body
+  --toon                  Encode output as TOON (token-efficient for LLMs)
+  --version               Show version
 ```
 
 Subcommands and flags are generated dynamically from the source.
@@ -79,6 +83,23 @@ mcp2cli --mcp https://mcp.example.com/sse \
   --auth-header "x-org-id:org_123" \
   search --query "test"
 ```
+
+### OAuth authentication (MCP HTTP only)
+
+```bash
+# Authorization code + PKCE (opens browser)
+mcp2cli --mcp https://mcp.example.com/sse --oauth --list
+
+# Client credentials (machine-to-machine)
+mcp2cli --mcp https://mcp.example.com/sse \
+  --oauth-client-id "my-id" --oauth-client-secret "my-secret" \
+  search --query "test"
+
+# With scopes
+mcp2cli --mcp https://mcp.example.com/sse --oauth --oauth-scope "read write" --list
+```
+
+Tokens are cached in `~/.cache/mcp2cli/oauth/` and refreshed automatically.
 
 ### POST with JSON body from stdin
 

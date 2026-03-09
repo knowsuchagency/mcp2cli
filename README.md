@@ -49,6 +49,28 @@ mcp2cli --mcp https://mcp.example.com/sse --auth-header "x-api-key:sk-..." \
 mcp2cli --mcp https://mcp.example.com/sse --transport sse --list
 ```
 
+### OAuth authentication
+
+MCP servers that require OAuth are supported out of the box. mcp2cli handles token acquisition,
+caching, and refresh automatically.
+
+```bash
+# Authorization code + PKCE flow (opens browser for login)
+mcp2cli --mcp https://mcp.example.com/sse --oauth --list
+
+# Client credentials flow (machine-to-machine, no browser)
+mcp2cli --mcp https://mcp.example.com/sse \
+  --oauth-client-id "my-client-id" \
+  --oauth-client-secret "my-secret" \
+  search --query "test"
+
+# With specific scopes
+mcp2cli --mcp https://mcp.example.com/sse --oauth --oauth-scope "read write" --list
+```
+
+Tokens are persisted in `~/.cache/mcp2cli/oauth/` so subsequent calls reuse existing tokens
+and refresh automatically when they expire.
+
 ### MCP stdio mode
 
 ```bash
@@ -131,18 +153,22 @@ Source (mutually exclusive, one required):
   --mcp-stdio CMD       MCP server command (stdio transport)
 
 Options:
-  --auth-header K:V     HTTP header (repeatable)
-  --base-url URL        Override base URL from spec
-  --transport TYPE      MCP HTTP transport: auto|sse|streamable (default: auto)
-  --env KEY=VALUE       Env var for MCP stdio server (repeatable)
-  --cache-key KEY       Custom cache key
-  --cache-ttl SECONDS   Cache TTL (default: 3600)
-  --refresh             Bypass cache
-  --list                List available subcommands
-  --pretty              Pretty-print JSON output
-  --raw                 Print raw response body
-  --toon                Encode output as TOON (token-efficient for LLMs)
-  --version             Show version
+  --auth-header K:V       HTTP header (repeatable, value supports env:/file: prefixes)
+  --base-url URL          Override base URL from spec
+  --transport TYPE        MCP HTTP transport: auto|sse|streamable (default: auto)
+  --env KEY=VALUE         Env var for MCP stdio server (repeatable)
+  --oauth                 Enable OAuth (authorization code + PKCE flow)
+  --oauth-client-id ID    OAuth client ID (supports env:/file: prefixes)
+  --oauth-client-secret S OAuth client secret (supports env:/file: prefixes)
+  --oauth-scope SCOPE     OAuth scope(s) to request
+  --cache-key KEY         Custom cache key
+  --cache-ttl SECONDS     Cache TTL (default: 3600)
+  --refresh               Bypass cache
+  --list                  List available subcommands
+  --pretty                Pretty-print JSON output
+  --raw                   Print raw response body
+  --toon                  Encode output as TOON (token-efficient for LLMs)
+  --version               Show version
 ```
 
 Subcommands and their flags are generated dynamically from the spec or MCP server tool definitions. Run `<subcommand> --help` for details.
