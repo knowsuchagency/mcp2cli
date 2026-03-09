@@ -52,6 +52,7 @@ Source (mutually exclusive, one required):
 Options:
   --auth-header K:V       HTTP header (repeatable, value supports env:/file: prefixes)
   --base-url URL          Override base URL from spec
+  --transport TYPE        MCP HTTP transport: auto|sse|streamable (default: auto)
   --env KEY=VALUE         Env var for stdio server process (repeatable)
   --oauth                 Enable OAuth (authorization code + PKCE flow)
   --oauth-client-id ID    OAuth client ID (supports env:/file: prefixes)
@@ -104,6 +105,19 @@ mcp2cli --mcp https://mcp.example.com/sse --oauth --oauth-scope "read write" --l
 ```
 
 Tokens are cached in `~/.cache/mcp2cli/oauth/` and refreshed automatically.
+
+### Transport selection (MCP HTTP only)
+
+```bash
+# Default: tries streamable HTTP, falls back to SSE
+mcp2cli --mcp https://mcp.example.com/sse --list
+
+# Force SSE transport (skip streamable HTTP attempt)
+mcp2cli --mcp https://mcp.example.com/sse --transport sse --list
+
+# Force streamable HTTP (no SSE fallback)
+mcp2cli --mcp https://mcp.example.com/sse --transport streamable --list
+```
 
 ### POST with JSON body from stdin
 
