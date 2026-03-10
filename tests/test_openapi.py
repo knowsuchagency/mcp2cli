@@ -67,7 +67,9 @@ class TestBuildArgparse:
 
         pre = argparse.ArgumentParser(add_help=False)
         parser = build_argparse(cmds, pre)
-        args = parser.parse_args(["list-pets", "--limit", "10", "--status", "available"])
+        args = parser.parse_args(
+            ["list-pets", "--limit", "10", "--status", "available"]
+        )
         assert args.limit == 10
         assert args.status == "available"
 
@@ -87,9 +89,13 @@ class TestExecuteOpenAPI:
 
     def _run(self, petstore_server, *args) -> subprocess.CompletedProcess:
         cmd = [
-            sys.executable, "-m", "mcp2cli",
-            "--spec", f"{petstore_server}/openapi.json",
-            "--base-url", f"{petstore_server}/api/v1",
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--spec",
+            f"{petstore_server}/openapi.json",
+            "--base-url",
+            f"{petstore_server}/api/v1",
             *args,
         ]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -138,10 +144,15 @@ class TestExecuteOpenAPI:
 
     def test_create_pet_stdin(self, petstore_server):
         cmd = [
-            sys.executable, "-m", "mcp2cli",
-            "--spec", f"{petstore_server}/openapi.json",
-            "--base-url", f"{petstore_server}/api/v1",
-            "create-pet", "--stdin",
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--spec",
+            f"{petstore_server}/openapi.json",
+            "--base-url",
+            f"{petstore_server}/api/v1",
+            "create-pet",
+            "--stdin",
         ]
         r = subprocess.run(
             cmd,
@@ -154,8 +165,32 @@ class TestExecuteOpenAPI:
         data = json.loads(r.stdout)
         assert data["name"] == "Snowball"
 
+    def test_create_pet_stdin_invalid_json(self, petstore_server):
+        cmd = [
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--spec",
+            f"{petstore_server}/openapi.json",
+            "--base-url",
+            f"{petstore_server}/api/v1",
+            "create-pet",
+            "--stdin",
+        ]
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            input='{"name": "Snowball",',
+            timeout=15,
+        )
+        assert r.returncode != 0
+        assert "invalid JSON" in r.stderr
+
     def test_update_pet(self, petstore_server):
-        r = self._run(petstore_server, "update-pet", "--pet-id", "1", "--name", "FidoUpdated")
+        r = self._run(
+            petstore_server, "update-pet", "--pet-id", "1", "--name", "FidoUpdated"
+        )
         assert r.returncode == 0
         data = json.loads(r.stdout)
         assert data["name"] == "FidoUpdated"
@@ -177,7 +212,9 @@ class TestExecuteOpenAPI:
     def test_version(self, petstore_server):
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert r.returncode == 0
         assert "mcp2cli" in r.stdout
@@ -185,7 +222,9 @@ class TestExecuteOpenAPI:
     def test_no_mode_shows_help(self):
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert r.returncode != 0
         assert "--spec" in r.stdout or "--spec" in r.stderr
@@ -193,7 +232,9 @@ class TestExecuteOpenAPI:
     def test_mutual_exclusion(self, petstore_server):
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--spec", "x", "--mcp", "y", "--list"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert r.returncode != 0
         assert "mutually exclusive" in r.stderr
