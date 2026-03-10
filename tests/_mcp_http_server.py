@@ -1,11 +1,22 @@
 
 """Minimal MCP HTTP server for testing."""
 import asyncio
+import base64
 import socket
 import sys
 
 from mcp.server import Server
-from mcp.types import TextContent, Tool
+from mcp.server.lowlevel.helper_types import ReadResourceContents
+from mcp.types import (
+    GetPromptResult,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+    Tool,
+)
 
 app = Server("test-http-server")
 
@@ -47,6 +58,67 @@ async def call_tool(name: str, arguments: dict):
         result = arguments.get("a", 0) + arguments.get("b", 0)
         return [TextContent(type="text", text=str(result))]
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+
+@app.list_resources()
+async def list_resources():
+    return [
+        Resource(
+            uri="file:///test/doc.txt",
+            name="Test Document",
+            description="A test text document",
+            mimeType="text/plain",
+        ),
+    ]
+
+
+@app.list_resource_templates()
+async def list_resource_templates():
+    return [
+        ResourceTemplate(
+            uriTemplate="file:///test/{name}.txt",
+            name="Text File",
+            description="A text file by name",
+            mimeType="text/plain",
+        ),
+    ]
+
+
+@app.read_resource()
+async def read_resource(uri):
+    uri_str = str(uri)
+    if uri_str == "file:///test/doc.txt":
+        return [ReadResourceContents(content="Hello from test document!", mime_type="text/plain")]
+    raise ValueError(f"Resource not found: {uri_str}")
+
+
+@app.list_prompts()
+async def list_prompts():
+    return [
+        Prompt(
+            name="greeting",
+            description="Generate a greeting message",
+            arguments=[
+                PromptArgument(name="name", description="Name to greet", required=True),
+                PromptArgument(name="style", description="Greeting style", required=False),
+            ],
+        ),
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict | None = None):
+    arguments = arguments or {}
+    if name == "greeting":
+        who = arguments.get("name", "World")
+        style = arguments.get("style", "friendly")
+        return GetPromptResult(
+            description=f"A {style} greeting",
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=f"Please greet {who} in a {style} way.")),
+            ],
+        )
+    raise ValueError(f"Unknown prompt: {name}")
 
 
 def find_free_port():

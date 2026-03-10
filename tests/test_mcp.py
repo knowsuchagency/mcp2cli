@@ -96,6 +96,56 @@ class TestMCPStdio:
         r2 = self._run("echo", "--message", "second")
         assert r2.returncode == 0
 
+    # --- Resources ---
+
+    def test_list_resources(self):
+        r = self._run("--list-resources")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        names = [d["name"] for d in data]
+        assert "Test Document" in names
+
+    def test_list_resource_templates(self):
+        r = self._run("--list-resource-templates")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert len(data) >= 1
+        assert "uriTemplate" in data[0]
+
+    def test_read_resource(self):
+        r = self._run("--read-resource", "file:///test/doc.txt")
+        assert r.returncode == 0
+        assert "Hello from test document!" in r.stdout
+
+    def test_read_resource_not_found(self):
+        r = self._run("--read-resource", "file:///nonexistent")
+        assert r.returncode != 0
+
+    # --- Prompts ---
+
+    def test_list_prompts(self):
+        r = self._run("--list-prompts")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        names = [d["name"] for d in data]
+        assert "greeting" in names
+        assert "summary" in names
+
+    def test_get_prompt(self):
+        r = self._run("--get-prompt", "greeting", "--prompt-arg", "name=Alice")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert "messages" in data
+        assert "Alice" in data["messages"][0]["content"]
+
+    def test_get_prompt_no_args(self):
+        r = self._run("--get-prompt", "greeting")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert "messages" in data
+        # Default name should be "World"
+        assert "World" in data["messages"][0]["content"]
+
 
 class TestMCPHTTP:
     """Tests for MCP HTTP transport.
@@ -169,91 +219,116 @@ class TestMCPHTTP:
         assert r.returncode == 0
         assert "30" in r.stdout
 
+    # --- Resources (HTTP) ---
 
-_MCP_HTTP_SERVER_SCRIPT = '''
-"""Minimal MCP HTTP server for testing."""
-import asyncio
-import socket
-import sys
+    def test_list_resources_http(self, mcp_http_server):
+        r = self._run(mcp_http_server, "--list-resources")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        names = [d["name"] for d in data]
+        assert "Test Document" in names
 
-from mcp.server import Server
-from mcp.types import TextContent, Tool
+    def test_list_resource_templates_http(self, mcp_http_server):
+        r = self._run(mcp_http_server, "--list-resource-templates")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert len(data) >= 1
 
-app = Server("test-http-server")
+    def test_read_resource_http(self, mcp_http_server):
+        r = self._run(mcp_http_server, "--read-resource", "file:///test/doc.txt")
+        assert r.returncode == 0
+        assert "Hello from test document!" in r.stdout
 
+    # --- Prompts (HTTP) ---
 
-@app.list_tools()
-async def list_tools():
-    return [
-        Tool(
-            name="echo",
-            description="Echo back the input",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {"type": "string", "description": "Message to echo"},
-                },
-                "required": ["message"],
-            },
-        ),
-        Tool(
-            name="add_numbers",
-            description="Add two numbers",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "a": {"type": "integer", "description": "First number"},
-                    "b": {"type": "integer", "description": "Second number"},
-                },
-                "required": ["a", "b"],
-            },
-        ),
-    ]
+    def test_list_prompts_http(self, mcp_http_server):
+        r = self._run(mcp_http_server, "--list-prompts")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        names = [d["name"] for d in data]
+        assert "greeting" in names
+
+    def test_get_prompt_http(self, mcp_http_server):
+        r = self._run(mcp_http_server, "--get-prompt", "greeting", "--prompt-arg", "name=Bob")
+        assert r.returncode == 0
+        data = json.loads(r.stdout)
+        assert "Bob" in data["messages"][0]["content"]
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict):
-    if name == "echo":
-        return [TextContent(type="text", text=arguments.get("message", ""))]
-    if name == "add_numbers":
-        result = arguments.get("a", 0) + arguments.get("b", 0)
-        return [TextContent(type="text", text=str(result))]
-    return [TextContent(type="text", text=f"Unknown tool: {name}")]
+class TestSessions:
+    """Tests for persistent session support."""
+
+    def test_session_lifecycle(self):
+        """Start, list, and stop a session."""
+        server = f"{sys.executable} {MCP_SERVER}"
+        name = "test-lifecycle"
+
+        # Start
+        r = subprocess.run(
+            [sys.executable, "-m", "mcp2cli", "--mcp-stdio", server, "--session-start", name],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert r.returncode == 0
+        assert name in r.stdout
+
+        try:
+            # List
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session-list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+            assert name in r.stdout
+            assert "alive" in r.stdout
+
+            # Tool call via session
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session", name, "echo", "--message", "via session"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+            assert "via session" in r.stdout
+
+            # List tools via session
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session", name, "--list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+            assert "echo" in r.stdout
+
+            # Resources via session
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session", name, "--list-resources"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+            data = json.loads(r.stdout)
+            assert any(d["name"] == "Test Document" for d in data)
+
+            # Prompts via session
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session", name, "--list-prompts"],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+            data = json.loads(r.stdout)
+            assert any(d["name"] == "greeting" for d in data)
+
+        finally:
+            # Stop
+            r = subprocess.run(
+                [sys.executable, "-m", "mcp2cli", "--session-stop", name],
+                capture_output=True, text=True, timeout=10,
+            )
+            assert r.returncode == 0
+
+        # Verify stopped
+        r = subprocess.run(
+            [sys.executable, "-m", "mcp2cli", "--session-list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert name not in r.stdout or "dead" in r.stdout
 
 
-def find_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-async def main():
-    from mcp.server.sse import SseServerTransport
-    from starlette.applications import Starlette
-    from starlette.routing import Mount, Route
-    import uvicorn
-
-    sse = SseServerTransport("/messages/")
-
-    async def handle_sse(request):
-        async with sse.connect_sse(request.scope, request.receive, request._send) as (read, write):
-            await app.run(read, write, app.create_initialization_options())
-
-    starlette_app = Starlette(
-        routes=[
-            Route("/sse", endpoint=handle_sse),
-            Mount("/messages/", app=sse.handle_post_message),
-        ],
-    )
-
-    port = find_free_port()
-    print(f"PORT={port}", flush=True)
-
-    config = uvicorn.Config(starlette_app, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-'''
+_MCP_HTTP_SERVER_SCRIPT = ''  # Server script is now in _mcp_http_server.py

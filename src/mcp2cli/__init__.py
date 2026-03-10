@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 import argparse
 import copy
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -20,8 +23,6 @@ from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-
-import os
 
 import anyio
 import httpx
@@ -764,7 +765,17 @@ def run_mcp_http(
     toon: bool = False,
     transport: str = "auto",
     oauth_provider: httpx.Auth | None = None,
+    resource_action: str | None = None,
+    resource_uri: str | None = None,
+    prompt_action: str | None = None,
+    prompt_name: str | None = None,
+    prompt_arguments: dict | None = None,
 ):
+    extra = dict(
+        resource_action=resource_action, resource_uri=resource_uri,
+        prompt_action=prompt_action, prompt_name=prompt_name,
+        prompt_arguments=prompt_arguments,
+    )
 
     async def _run():
         from mcp import ClientSession
@@ -778,7 +789,7 @@ def run_mcp_http(
                     await session.initialize()
                     return await _mcp_session(
                         session, tool_name, arguments, list_mode, pretty, raw,
-                        cache_key, ttl, refresh, toon=toon,
+                        cache_key, ttl, refresh, toon=toon, **extra,
                     )
 
         async def _with_sse():
@@ -788,7 +799,7 @@ def run_mcp_http(
                     await session.initialize()
                     return await _mcp_session(
                         session, tool_name, arguments, list_mode, pretty, raw,
-                        cache_key, ttl, refresh, toon=toon,
+                        cache_key, ttl, refresh, toon=toon, **extra,
                     )
 
         if transport == "sse":
@@ -816,7 +827,17 @@ def run_mcp_stdio(
     ttl: int,
     refresh: bool,
     toon: bool = False,
+    resource_action: str | None = None,
+    resource_uri: str | None = None,
+    prompt_action: str | None = None,
+    prompt_name: str | None = None,
+    prompt_arguments: dict | None = None,
 ):
+    extra = dict(
+        resource_action=resource_action, resource_uri=resource_uri,
+        prompt_action=prompt_action, prompt_name=prompt_name,
+        prompt_arguments=prompt_arguments,
+    )
 
     import anyio
 
@@ -833,7 +854,7 @@ def run_mcp_stdio(
                 await session.initialize()
                 await _mcp_session(
                     session, tool_name, arguments, list_mode, pretty, raw,
-                    cache_key, ttl, refresh, toon=toon,
+                    cache_key, ttl, refresh, toon=toon, **extra,
                 )
 
     anyio.run(_run)
@@ -850,7 +871,22 @@ async def _mcp_session(
     ttl: int,
     refresh: bool,
     toon: bool = False,
+    resource_action: str | None = None,
+    resource_uri: str | None = None,
+    prompt_action: str | None = None,
+    prompt_name: str | None = None,
+    prompt_arguments: dict | None = None,
 ):
+    # Handle resource operations
+    if resource_action:
+        await _handle_resources(session, resource_action, resource_uri, pretty, raw, toon)
+        return
+
+    # Handle prompt operations
+    if prompt_action:
+        await _handle_prompts(session, prompt_action, prompt_name, prompt_arguments, pretty, raw, toon)
+        return
+
     if list_mode:
         result = await session.list_tools()
         tools = [
@@ -881,6 +917,444 @@ async def _mcp_session(
 
 
 # ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+
+
+async def _handle_resources(session, action: str, uri: str | None, pretty: bool, raw: bool, toon: bool):
+    if action == "list":
+        result = await session.list_resources()
+        data = [
+            {
+                "name": r.name,
+                "uri": str(r.uri),
+                "description": r.description or "",
+                "mimeType": r.mimeType or "",
+            }
+            for r in result.resources
+        ]
+        output_result(data, pretty=pretty, raw=raw, toon=toon)
+    elif action == "templates":
+        result = await session.list_resource_templates()
+        data = [
+            {
+                "name": t.name,
+                "uriTemplate": str(t.uriTemplate),
+                "description": t.description or "",
+                "mimeType": t.mimeType or "",
+            }
+            for t in result.resourceTemplates
+        ]
+        output_result(data, pretty=pretty, raw=raw, toon=toon)
+    elif action == "read":
+        from pydantic import AnyUrl
+
+        result = await session.read_resource(AnyUrl(uri))
+        parts = []
+        for content in result.contents:
+            if hasattr(content, "text"):
+                parts.append(content.text)
+            elif hasattr(content, "blob"):
+                parts.append(content.blob)
+        text = "\n".join(parts) if parts else ""
+        output_result(text, pretty=pretty, raw=raw, toon=toon)
+
+
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+
+async def _handle_prompts(session, action: str, name: str | None, arguments: dict | None, pretty: bool, raw: bool, toon: bool):
+    if action == "list":
+        result = await session.list_prompts()
+        data = [
+            {
+                "name": p.name,
+                "description": p.description or "",
+                "arguments": [
+                    {"name": a.name, "description": a.description or "", "required": a.required or False}
+                    for a in (p.arguments or [])
+                ],
+            }
+            for p in result.prompts
+        ]
+        output_result(data, pretty=pretty, raw=raw, toon=toon)
+    elif action == "get":
+        result = await session.get_prompt(name, arguments or {})
+        messages = []
+        for msg in result.messages:
+            content = msg.content
+            if hasattr(content, "text"):
+                messages.append({"role": msg.role, "content": content.text})
+            else:
+                messages.append({"role": msg.role, "content": json.dumps(content.model_dump())})
+        data = {"description": result.description or "", "messages": messages}
+        output_result(data, pretty=pretty, raw=raw, toon=toon)
+
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+SESSIONS_DIR = CACHE_DIR / "sessions"
+
+
+def _session_meta_path(name: str) -> Path:
+    return SESSIONS_DIR / f"{name}.json"
+
+
+def _session_sock_path(name: str) -> Path:
+    return SESSIONS_DIR / f"{name}.sock"
+
+
+def _session_is_alive(meta: dict) -> bool:
+    pid = meta.get("pid")
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def session_list() -> list[dict]:
+    """List active sessions."""
+    if not SESSIONS_DIR.exists():
+        return []
+    sessions = []
+    for meta_file in SESSIONS_DIR.glob("*.json"):
+        try:
+            meta = json.loads(meta_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        name = meta_file.stem
+        meta["name"] = name
+        meta["alive"] = _session_is_alive(meta)
+        sessions.append(meta)
+    return sessions
+
+
+def session_stop(name: str):
+    """Stop a named session."""
+    meta_path = _session_meta_path(name)
+    sock_path = _session_sock_path(name)
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            pid = meta.get("pid")
+            if pid and _session_is_alive(meta):
+                os.kill(pid, signal.SIGTERM)
+                # Wait briefly for clean shutdown
+                for _ in range(10):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.1)
+                    except OSError:
+                        break
+        except (json.JSONDecodeError, OSError):
+            pass
+        meta_path.unlink(missing_ok=True)
+    sock_path.unlink(missing_ok=True)
+
+
+def session_start(
+    name: str,
+    source: str,
+    is_stdio: bool,
+    auth_headers: list[tuple[str, str]],
+    env_vars: dict[str, str],
+    transport: str = "auto",
+):
+    """Start a persistent session daemon."""
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Check if already running
+    meta_path = _session_meta_path(name)
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            if _session_is_alive(meta):
+                print(f"Session '{name}' is already running (PID {meta['pid']})", file=sys.stderr)
+                sys.exit(1)
+        except (json.JSONDecodeError, OSError):
+            pass
+        # Stale session — clean up
+        meta_path.unlink(missing_ok=True)
+        _session_sock_path(name).unlink(missing_ok=True)
+
+    # Spawn daemon
+    daemon_script = json.dumps({
+        "name": name,
+        "source": source,
+        "is_stdio": is_stdio,
+        "auth_headers": auth_headers,
+        "env_vars": env_vars,
+        "transport": transport,
+    })
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", f"import mcp2cli; mcp2cli._run_session_daemon({json.dumps(daemon_script)})"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+    )
+
+    # Wait for socket to appear
+    sock_path = _session_sock_path(name)
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if sock_path.exists():
+            print(f"Session '{name}' started (PID {proc.pid})")
+            return
+        if proc.poll() is not None:
+            print(f"Error: session daemon exited with code {proc.returncode}", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(0.1)
+
+    print("Error: session daemon did not start in time", file=sys.stderr)
+    proc.kill()
+    sys.exit(1)
+
+
+def _run_session_daemon(config_json: str):
+    """Entry point for the session daemon process."""
+    config = json.loads(config_json)
+    name = config["name"]
+    source = config["source"]
+    is_stdio = config["is_stdio"]
+    auth_headers = [tuple(h) for h in config["auth_headers"]]
+    env_vars = config["env_vars"]
+    transport = config["transport"]
+
+    sock_path = _session_sock_path(name)
+    meta_path = _session_meta_path(name)
+
+    import anyio
+
+    async def _dispatch(session, method: str, params: dict):
+        """Dispatch a method call to the MCP session."""
+        if method == "list_tools":
+            result = await session.list_tools()
+            return [
+                {"name": t.name, "description": t.description or "", "inputSchema": t.inputSchema or {}}
+                for t in result.tools
+            ]
+        elif method == "call_tool":
+            result = await session.call_tool(params["name"], params.get("arguments", {}))
+            parts = []
+            for c in result.content:
+                if hasattr(c, "text"):
+                    parts.append(c.text)
+                elif hasattr(c, "data"):
+                    parts.append(c.data)
+            return "\n".join(parts)
+        elif method == "list_resources":
+            result = await session.list_resources()
+            return [
+                {"name": r.name, "uri": str(r.uri), "description": r.description or "", "mimeType": r.mimeType or ""}
+                for r in result.resources
+            ]
+        elif method == "read_resource":
+            from pydantic import AnyUrl
+            result = await session.read_resource(AnyUrl(params["uri"]))
+            parts = []
+            for c in result.contents:
+                if hasattr(c, "text"):
+                    parts.append(c.text)
+                elif hasattr(c, "blob"):
+                    parts.append(c.blob)
+            return "\n".join(parts)
+        elif method == "list_resource_templates":
+            result = await session.list_resource_templates()
+            return [
+                {"name": t.name, "uriTemplate": str(t.uriTemplate), "description": t.description or "", "mimeType": t.mimeType or ""}
+                for t in result.resourceTemplates
+            ]
+        elif method == "list_prompts":
+            result = await session.list_prompts()
+            return [
+                {"name": p.name, "description": p.description or "", "arguments": [
+                    {"name": a.name, "description": a.description or "", "required": a.required or False}
+                    for a in (p.arguments or [])
+                ]}
+                for p in result.prompts
+            ]
+        elif method == "get_prompt":
+            result = await session.get_prompt(params["name"], params.get("arguments", {}))
+            messages = []
+            for msg in result.messages:
+                content = msg.content
+                if hasattr(content, "text"):
+                    messages.append({"role": msg.role, "content": content.text})
+                else:
+                    messages.append({"role": msg.role, "content": json.dumps(content.model_dump())})
+            return {"description": result.description or "", "messages": messages}
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+    async def _daemon():
+        from mcp import ClientSession
+
+        async def _run_with_session(session):
+            await session.initialize()
+
+            # Write metadata
+            meta = {
+                "pid": os.getpid(),
+                "source": source,
+                "transport": "stdio" if is_stdio else "http",
+                "created_at": time.time(),
+            }
+            meta_path.write_text(json.dumps(meta))
+
+            # Start Unix domain socket server
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                server_sock.bind(str(sock_path))
+                server_sock.listen(5)
+                server_sock.settimeout(1.0)
+
+                # Handle SIGTERM
+                _shutdown = False
+
+                def _on_sigterm(*_):
+                    nonlocal _shutdown
+                    _shutdown = True
+
+                signal.signal(signal.SIGTERM, _on_sigterm)
+
+                def _blocking_accept():
+                    """Accept a connection in a thread (blocks until connection or timeout)."""
+                    while not _shutdown:
+                        try:
+                            return server_sock.accept()
+                        except socket.timeout:
+                            continue
+                        except OSError:
+                            return None, None
+                    return None, None
+
+                while not _shutdown:
+                    conn, _ = await anyio.to_thread.run_sync(_blocking_accept)
+                    if conn is None:
+                        break
+
+                    try:
+                        conn.settimeout(5)
+
+                        def _recv_request(c):
+                            data = b""
+                            while True:
+                                chunk = c.recv(65536)
+                                if not chunk:
+                                    break
+                                data += chunk
+                                if b"\n" in data:
+                                    break
+                            return data
+
+                        raw = await anyio.to_thread.run_sync(lambda: _recv_request(conn))
+                        line = raw.split(b"\n", 1)[0]
+                        if not line:
+                            conn.close()
+                            continue
+
+                        request = json.loads(line)
+                        req_id = request.get("id", 0)
+                        method = request.get("method", "")
+                        params = request.get("params", {})
+
+                        try:
+                            resp_data = await _dispatch(session, method, params)
+                            response = json.dumps({"id": req_id, "result": resp_data}) + "\n"
+                        except Exception as e:
+                            response = json.dumps({"id": req_id, "error": str(e)}) + "\n"
+
+                        def _send(c, data):
+                            c.sendall(data)
+
+                        await anyio.to_thread.run_sync(lambda: _send(conn, response.encode()))
+                    except Exception:
+                        pass
+                    finally:
+                        conn.close()
+
+            finally:
+                server_sock.close()
+                sock_path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+
+        if is_stdio:
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+
+            parts = shlex.split(source)
+            env = {**os.environ, **env_vars}
+            params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await _run_with_session(session)
+        else:
+            headers = dict(auth_headers) if auth_headers else None
+
+            async def _via_streamable():
+                from mcp.client.streamable_http import streamablehttp_client
+                async with streamablehttp_client(source, headers=headers) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await _run_with_session(session)
+
+            async def _via_sse():
+                from mcp.client.sse import sse_client
+                async with sse_client(source, headers=headers) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await _run_with_session(session)
+
+            if transport == "sse":
+                await _via_sse()
+            elif transport == "streamable":
+                await _via_streamable()
+            else:
+                try:
+                    await _via_streamable()
+                except Exception:
+                    await _via_sse()
+
+    anyio.run(_daemon)
+
+
+def _session_request(name: str, method: str, params: dict | None = None) -> any:
+    """Send a request to a session daemon and return the result."""
+    sock_path = _session_sock_path(name)
+    if not sock_path.exists():
+        print(f"Error: session '{name}' not found", file=sys.stderr)
+        sys.exit(1)
+
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.connect(str(sock_path))
+        request = json.dumps({"id": 1, "method": method, "params": params or {}}) + "\n"
+        conn.sendall(request.encode())
+        conn.shutdown(socket.SHUT_WR)
+
+        data = b""
+        while True:
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+
+        response = json.loads(data.decode())
+        if "error" in response:
+            print(f"Error: {response['error']}", file=sys.stderr)
+            sys.exit(1)
+        return response["result"]
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # MCP: argparse integration
 # ---------------------------------------------------------------------------
 
@@ -900,10 +1374,29 @@ def handle_mcp(
     toon: bool = False,
     transport: str = "auto",
     oauth_provider: httpx.Auth | None = None,
+    resource_action: str | None = None,
+    resource_uri: str | None = None,
+    prompt_action: str | None = None,
+    prompt_name: str | None = None,
+    prompt_arguments: dict | None = None,
 ):
 
 
     key = cache_key_override or cache_key_for(source)
+
+    # Resource/prompt operations skip the tool flow entirely
+    if resource_action or prompt_action:
+        extra = dict(
+            resource_action=resource_action, resource_uri=resource_uri,
+            prompt_action=prompt_action, prompt_name=prompt_name,
+            prompt_arguments=prompt_arguments,
+        )
+        if is_stdio:
+            run_mcp_stdio(source, env_vars, None, None, False, pretty, raw, key, ttl, refresh, toon=toon, **extra)
+        else:
+            run_mcp_http(source, auth_headers, None, None, False, pretty, raw, key, ttl, refresh, toon=toon,
+                         transport=transport, oauth_provider=oauth_provider, **extra)
+        return
 
     if list_mode:
         if is_stdio:
@@ -1095,6 +1588,23 @@ def main():
         default=None,
         help="OAuth scope(s) to request",
     )
+    # Resource flags
+    pre.add_argument("--list-resources", action="store_true", help="List available resources")
+    pre.add_argument("--list-resource-templates", action="store_true", help="List resource templates")
+    pre.add_argument("--read-resource", default=None, metavar="URI", help="Read a resource by URI")
+
+    # Prompt flags
+    pre.add_argument("--list-prompts", action="store_true", help="List available prompts")
+    pre.add_argument("--get-prompt", default=None, metavar="NAME", help="Get a prompt by name")
+    pre.add_argument("--prompt-arg", action="append", default=[], metavar="KEY=VALUE",
+                      help="Argument for --get-prompt (repeatable)")
+
+    # Session flags
+    pre.add_argument("--session-start", default=None, metavar="NAME", help="Start a persistent session daemon")
+    pre.add_argument("--session-stop", default=None, metavar="NAME", help="Stop a named session")
+    pre.add_argument("--session-list", action="store_true", help="List active sessions")
+    pre.add_argument("--session", default=None, metavar="NAME", help="Use an existing session")
+
     pre.add_argument("--version", action="version", version=f"mcp2cli {__version__}")
 
     pre_args, remaining = pre.parse_known_args()
@@ -1117,15 +1627,19 @@ def main():
         k, v = e.split("=", 1)
         env_vars[k] = v
 
+    # Session management commands don't require a source
+    needs_source = not (pre_args.session_list or pre_args.session_stop or pre_args.session)
+
     # Validate mutual exclusivity
     modes = [pre_args.spec, pre_args.mcp, pre_args.mcp_stdio]
     active = sum(1 for m in modes if m is not None)
-    if active == 0:
-        pre.print_help()
-        if "-h" in remaining or "--help" in remaining:
-            sys.exit(0)
-        print("\nError: one of --spec, --mcp, or --mcp-stdio is required.", file=sys.stderr)
-        sys.exit(1)
+    if needs_source:
+        if active == 0:
+            pre.print_help()
+            if "-h" in remaining or "--help" in remaining:
+                sys.exit(0)
+            print("\nError: one of --spec, --mcp, or --mcp-stdio is required.", file=sys.stderr)
+            sys.exit(1)
     if active > 1:
         print("Error: --spec, --mcp, and --mcp-stdio are mutually exclusive.", file=sys.stderr)
         sys.exit(1)
@@ -1152,6 +1666,132 @@ def main():
             scope=pre_args.oauth_scope,
         )
 
+    # --- Session management (no source required) ---
+    if pre_args.session_list:
+        sessions = session_list()
+        if not sessions:
+            print("No active sessions.")
+        else:
+            for s in sessions:
+                status = "alive" if s["alive"] else "dead"
+                print(f"  {s['name']:<20} {s['transport']:<8} {status}  PID={s.get('pid', '?')}")
+        return
+
+    if pre_args.session_stop:
+        session_stop(pre_args.session_stop)
+        print(f"Session '{pre_args.session_stop}' stopped.")
+        return
+
+    if pre_args.session_start:
+        if not (pre_args.mcp or pre_args.mcp_stdio):
+            print("Error: --session-start requires --mcp or --mcp-stdio", file=sys.stderr)
+            sys.exit(1)
+        source = pre_args.mcp or pre_args.mcp_stdio
+        is_stdio = pre_args.mcp_stdio is not None
+        session_start(pre_args.session_start, source, is_stdio, auth_headers, env_vars,
+                       transport=pre_args.transport)
+        return
+
+    # --- Session client mode ---
+    if pre_args.session:
+        sess_name = pre_args.session
+        # Determine resource/prompt action
+        resource_action = resource_uri = prompt_action = prompt_name = None
+        prompt_arguments: dict = {}
+
+        if pre_args.list_resources:
+            result = _session_request(sess_name, "list_resources")
+            output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+            return
+        if pre_args.list_resource_templates:
+            result = _session_request(sess_name, "list_resource_templates")
+            output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+            return
+        if pre_args.read_resource:
+            result = _session_request(sess_name, "read_resource", {"uri": pre_args.read_resource})
+            output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+            return
+        if pre_args.list_prompts:
+            result = _session_request(sess_name, "list_prompts")
+            output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+            return
+        if pre_args.get_prompt:
+            p_args = {}
+            for pa in pre_args.prompt_arg:
+                if "=" in pa:
+                    k, v = pa.split("=", 1)
+                    p_args[k] = v
+            result = _session_request(sess_name, "get_prompt", {"name": pre_args.get_prompt, "arguments": p_args})
+            output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+            return
+        if pre_args.list_commands:
+            result = _session_request(sess_name, "list_tools")
+            commands = extract_mcp_commands(result)
+            print("\nAvailable tools:")
+            list_mcp_commands(commands)
+            return
+
+        # Tool call via session
+        if not remaining:
+            # Fetch tools to show
+            result = _session_request(sess_name, "list_tools")
+            commands = extract_mcp_commands(result)
+            print("Available tools:")
+            list_mcp_commands(commands)
+            print("\nUse --list for the same output, or provide a subcommand.")
+            return
+
+        # Build argparse from cached/session tools
+        tools = _session_request(sess_name, "list_tools")
+        commands = extract_mcp_commands(tools)
+        pre_for_session = argparse.ArgumentParser(add_help=False)
+        parser = build_argparse(commands, pre_for_session)
+        args = parser.parse_args(remaining)
+
+        if not hasattr(args, "_cmd"):
+            parser.print_help()
+            sys.exit(1)
+
+        cmd: CommandDef = args._cmd
+        if getattr(args, "stdin", False):
+            arguments = json.loads(sys.stdin.read())
+        else:
+            arguments = {}
+            for p in cmd.params:
+                val = getattr(args, p.name.replace("-", "_"), None)
+                if val is not None:
+                    arguments[p.original_name] = val
+
+        result = _session_request(sess_name, "call_tool", {"name": cmd.tool_name, "arguments": arguments})
+        output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
+        return
+
+    # Determine resource/prompt actions
+    resource_action = None
+    resource_uri = None
+    prompt_action = None
+    prompt_name = None
+    prompt_arguments = None
+
+    if pre_args.list_resources:
+        resource_action = "list"
+    elif pre_args.list_resource_templates:
+        resource_action = "templates"
+    elif pre_args.read_resource:
+        resource_action = "read"
+        resource_uri = pre_args.read_resource
+
+    if pre_args.list_prompts:
+        prompt_action = "list"
+    elif pre_args.get_prompt:
+        prompt_action = "get"
+        prompt_name = pre_args.get_prompt
+        prompt_arguments = {}
+        for pa in pre_args.prompt_arg:
+            if "=" in pa:
+                k, v = pa.split("=", 1)
+                prompt_arguments[k] = v
+
     # --- MCP modes ---
     if pre_args.mcp or pre_args.mcp_stdio:
         source = pre_args.mcp or pre_args.mcp_stdio
@@ -1171,6 +1811,11 @@ def main():
             toon=pre_args.toon,
             transport=pre_args.transport,
             oauth_provider=oauth_provider,
+            resource_action=resource_action,
+            resource_uri=resource_uri,
+            prompt_action=prompt_action,
+            prompt_name=prompt_name,
+            prompt_arguments=prompt_arguments,
         )
         return
 

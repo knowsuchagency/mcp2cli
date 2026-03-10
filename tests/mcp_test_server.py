@@ -4,8 +4,18 @@ import asyncio
 import sys
 
 from mcp.server import Server
+from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import (
+    GetPromptResult,
+    Prompt,
+    PromptArgument,
+    PromptMessage,
+    Resource,
+    ResourceTemplate,
+    TextContent,
+    Tool,
+)
 
 app = Server("test-server")
 
@@ -49,6 +59,90 @@ async def list_tools():
             },
         ),
     ]
+
+
+@app.list_resources()
+async def list_resources():
+    return [
+        Resource(
+            uri="file:///test/doc.txt",
+            name="Test Document",
+            description="A test text document",
+            mimeType="text/plain",
+        ),
+        Resource(
+            uri="file:///test/data.bin",
+            name="Binary Data",
+            description="A test binary resource",
+            mimeType="application/octet-stream",
+        ),
+    ]
+
+
+@app.list_resource_templates()
+async def list_resource_templates():
+    return [
+        ResourceTemplate(
+            uriTemplate="file:///test/{name}.txt",
+            name="Text File",
+            description="A text file by name",
+            mimeType="text/plain",
+        ),
+    ]
+
+
+@app.read_resource()
+async def read_resource(uri):
+    uri_str = str(uri)
+    if uri_str == "file:///test/doc.txt":
+        return [ReadResourceContents(content="Hello from test document!", mime_type="text/plain")]
+    if uri_str == "file:///test/data.bin":
+        return [ReadResourceContents(content=b"\x00\x01\x02\x03", mime_type="application/octet-stream")]
+    raise ValueError(f"Resource not found: {uri_str}")
+
+
+@app.list_prompts()
+async def list_prompts():
+    return [
+        Prompt(
+            name="greeting",
+            description="Generate a greeting message",
+            arguments=[
+                PromptArgument(name="name", description="Name to greet", required=True),
+                PromptArgument(name="style", description="Greeting style", required=False),
+            ],
+        ),
+        Prompt(
+            name="summary",
+            description="Summarize content",
+            arguments=[
+                PromptArgument(name="topic", description="Topic to summarize", required=True),
+            ],
+        ),
+    ]
+
+
+@app.get_prompt()
+async def get_prompt(name: str, arguments: dict | None = None):
+    arguments = arguments or {}
+    if name == "greeting":
+        who = arguments.get("name", "World")
+        style = arguments.get("style", "friendly")
+        return GetPromptResult(
+            description=f"A {style} greeting",
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=f"Please greet {who} in a {style} way.")),
+            ],
+        )
+    if name == "summary":
+        topic = arguments.get("topic", "general")
+        return GetPromptResult(
+            description=f"Summary of {topic}",
+            messages=[
+                PromptMessage(role="user", content=TextContent(type="text", text=f"Please summarize the topic: {topic}")),
+            ],
+        )
+    raise ValueError(f"Unknown prompt: {name}")
 
 
 @app.call_tool()
