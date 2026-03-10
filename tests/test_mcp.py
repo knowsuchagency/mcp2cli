@@ -15,12 +15,19 @@ class TestMCPStdio:
 
     def _run(self, *args, stdin_data=None) -> subprocess.CompletedProcess:
         cmd = [
-            sys.executable, "-m", "mcp2cli",
-            "--mcp-stdio", f"{sys.executable} {MCP_SERVER}",
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--mcp-stdio",
+            f"{sys.executable} {MCP_SERVER}",
             *args,
         ]
         return subprocess.run(
-            cmd, capture_output=True, text=True, input=stdin_data, timeout=30,
+            cmd,
+            capture_output=True,
+            text=True,
+            input=stdin_data,
+            timeout=30,
         )
 
     def test_list_tools(self):
@@ -58,6 +65,11 @@ class TestMCPStdio:
         assert r.returncode == 0
         assert "from stdin" in r.stdout
 
+    def test_echo_stdin_invalid_json(self):
+        r = self._run("echo", "--stdin", stdin_data='{"message":')
+        assert r.returncode != 0
+        assert "invalid JSON" in r.stderr
+
     def test_no_subcommand_shows_tools(self):
         r = self._run()
         assert r.returncode == 0
@@ -90,7 +102,11 @@ class TestMCPStdio:
         assert r1.returncode == 0
 
         # Cached tools file should exist
-        cache_files = list((tmp_path / "cache").glob("*_tools.json")) if (tmp_path / "cache").exists() else []
+        cache_files = (
+            list((tmp_path / "cache").glob("*_tools.json"))
+            if (tmp_path / "cache").exists()
+            else []
+        )
         # Cache may or may not exist depending on subprocess isolation
         # Just verify both runs succeed
         r2 = self._run("echo", "--message", "second")
@@ -174,6 +190,7 @@ class TestMCPHTTP:
 
         # Wait for server to be ready by reading the port from stdout
         import time
+
         port = None
         deadline = time.time() + 10
         while time.time() < deadline:
@@ -198,8 +215,11 @@ class TestMCPHTTP:
 
     def _run(self, url, *args) -> subprocess.CompletedProcess:
         cmd = [
-            sys.executable, "-m", "mcp2cli",
-            "--mcp", url,
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--mcp",
+            url,
             *args,
         ]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -249,7 +269,9 @@ class TestMCPHTTP:
         assert "greeting" in names
 
     def test_get_prompt_http(self, mcp_http_server):
-        r = self._run(mcp_http_server, "--get-prompt", "greeting", "--prompt-arg", "name=Bob")
+        r = self._run(
+            mcp_http_server, "--get-prompt", "greeting", "--prompt-arg", "name=Bob"
+        )
         assert r.returncode == 0
         data = json.loads(r.stdout)
         assert "Bob" in data["messages"][0]["content"]
@@ -265,8 +287,18 @@ class TestSessions:
 
         # Start
         r = subprocess.run(
-            [sys.executable, "-m", "mcp2cli", "--mcp-stdio", server, "--session-start", name],
-            capture_output=True, text=True, timeout=30,
+            [
+                sys.executable,
+                "-m",
+                "mcp2cli",
+                "--mcp-stdio",
+                server,
+                "--session-start",
+                name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         assert r.returncode == 0
         assert name in r.stdout
@@ -275,7 +307,9 @@ class TestSessions:
             # List
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-list"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
             assert name in r.stdout
@@ -283,8 +317,19 @@ class TestSessions:
 
             # Tool call via session
             r = subprocess.run(
-                [sys.executable, "-m", "mcp2cli", "--session", name, "echo", "--message", "via session"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    sys.executable,
+                    "-m",
+                    "mcp2cli",
+                    "--session",
+                    name,
+                    "echo",
+                    "--message",
+                    "via session",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
             assert "via session" in r.stdout
@@ -292,15 +337,26 @@ class TestSessions:
             # List tools via session
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session", name, "--list"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
             assert "echo" in r.stdout
 
             # Resources via session
             r = subprocess.run(
-                [sys.executable, "-m", "mcp2cli", "--session", name, "--list-resources"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    sys.executable,
+                    "-m",
+                    "mcp2cli",
+                    "--session",
+                    name,
+                    "--list-resources",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
             data = json.loads(r.stdout)
@@ -309,7 +365,9 @@ class TestSessions:
             # Prompts via session
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session", name, "--list-prompts"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
             data = json.loads(r.stdout)
@@ -319,16 +377,20 @@ class TestSessions:
             # Stop
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-stop", name],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             assert r.returncode == 0
 
         # Verify stopped
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--session-list"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert name not in r.stdout or "dead" in r.stdout
 
 
-_MCP_HTTP_SERVER_SCRIPT = ''  # Server script is now in _mcp_http_server.py
+_MCP_HTTP_SERVER_SCRIPT = ""  # Server script is now in _mcp_http_server.py

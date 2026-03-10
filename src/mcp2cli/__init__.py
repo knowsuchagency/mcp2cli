@@ -1652,7 +1652,7 @@ def handle_mcp(
     cmd: CommandDef = args._cmd
 
     if getattr(args, "stdin", False):
-        arguments = json.loads(sys.stdin.read())
+        arguments = read_stdin_json("MCP tool arguments")
     else:
         arguments = {}
         for p in cmd.params:
@@ -2087,7 +2087,7 @@ def main():
 
         cmd: CommandDef = args._cmd
         if getattr(args, "stdin", False):
-            arguments = json.loads(sys.stdin.read())
+            arguments = read_stdin_json(f"session {sess_name} tool arguments")
         else:
             arguments = {}
             for p in cmd.params:
