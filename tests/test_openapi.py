@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -210,6 +212,9 @@ class TestExecuteOpenAPI:
         json.loads(r.stdout)
 
     def test_version(self, petstore_server):
+        pyproject = tomllib.loads(
+            Path(__file__).resolve().parents[1].joinpath("pyproject.toml").read_text()
+        )
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--version"],
             capture_output=True,
@@ -217,7 +222,7 @@ class TestExecuteOpenAPI:
             timeout=10,
         )
         assert r.returncode == 0
-        assert "mcp2cli" in r.stdout
+        assert r.stdout.strip() == f"mcp2cli {pyproject['project']['version']}"
 
     def test_no_mode_shows_help(self):
         r = subprocess.run(

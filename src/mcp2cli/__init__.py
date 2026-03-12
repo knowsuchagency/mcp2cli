@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-__version__ = "1.4.0"
-
 import argparse
 import copy
 import hashlib
@@ -19,13 +17,31 @@ import sys
 import threading
 import time
 import webbrowser
+from importlib.metadata import PackageNotFoundError, version as package_version
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+import tomllib
 from urllib.parse import parse_qs, urlparse
 
 import anyio
 import httpx
+
+
+def _resolve_version() -> str:
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    if pyproject.exists():
+        with pyproject.open("rb") as handle:
+            data = tomllib.load(handle)
+        return data["project"]["version"]
+
+    try:
+        return package_version("mcp2cli")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
+__version__ = _resolve_version()
 
 CACHE_DIR = Path(
     os.environ.get("MCP2CLI_CACHE_DIR", Path.home() / ".cache" / "mcp2cli")
