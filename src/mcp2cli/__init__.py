@@ -224,7 +224,10 @@ def load_cached(key: str, ttl: int) -> dict | None:
     age = time.time() - path.stat().st_mtime
     if age >= ttl:
         return None
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def save_cache(key: str, data: dict):

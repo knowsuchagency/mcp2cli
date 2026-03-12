@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+import mcp2cli
+
 from conftest import PETSTORE_SPEC
 
 
@@ -77,7 +79,12 @@ def _run_cli(*args, cache_dir=None, stdin_data=None):
         # We can't monkeypatch a subprocess, so we inject via env
         env["MCP2CLI_CACHE_DIR"] = str(cache_dir)
     return subprocess.run(
-        cmd, capture_output=True, text=True, input=stdin_data, timeout=15, env=env,
+        cmd,
+        capture_output=True,
+        text=True,
+        input=stdin_data,
+        timeout=15,
+        env=env,
     )
 
 
@@ -89,13 +96,25 @@ class TestOpenAPICaching:
         cd = tmp_path / "cache"
         url = f"{counting_server}/openapi.json"
 
-        r1 = _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                       "--list", cache_dir=cd)
+        r1 = _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert r1.returncode == 0
         assert CountingHandler.spec_fetch_count == 1
 
-        r2 = _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                       "--list", cache_dir=cd)
+        r2 = _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert r2.returncode == 0
         # Should NOT have fetched again
         assert CountingHandler.spec_fetch_count == 1
@@ -104,12 +123,25 @@ class TestOpenAPICaching:
         cd = tmp_path / "cache"
         url = f"{counting_server}/openapi.json"
 
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 1
 
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--list", "--refresh", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            "--refresh",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 2
 
     def test_custom_cache_key(self, counting_server, tmp_path):
@@ -117,8 +149,16 @@ class TestOpenAPICaching:
         cd = tmp_path / "cache"
         url = f"{counting_server}/openapi.json"
 
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--cache-key", "my-petstore", "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--cache-key",
+            "my-petstore",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 1
 
         # Verify cache file uses our custom key
@@ -126,8 +166,16 @@ class TestOpenAPICaching:
         assert any("my-petstore" in f.name for f in cache_files)
 
         # Second call with same key should hit cache
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--cache-key", "my-petstore", "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--cache-key",
+            "my-petstore",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 1
 
     def test_cache_ttl_expiry(self, counting_server, tmp_path):
@@ -135,8 +183,14 @@ class TestOpenAPICaching:
         cd = tmp_path / "cache"
         url = f"{counting_server}/openapi.json"
 
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 1
 
         # Manually age the cache file
@@ -145,9 +199,40 @@ class TestOpenAPICaching:
             os.utime(f, (old, old))
 
         # With short TTL, should re-fetch
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--cache-ttl", "1", "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--cache-ttl",
+            "1",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 2
+
+    def test_corrupt_cached_spec_refetches_instead_of_crashing(
+        self, counting_server, tmp_path
+    ):
+        cd = tmp_path / "cache"
+        cd.mkdir(parents=True, exist_ok=True)
+        url = f"{counting_server}/openapi.json"
+        cache_key = mcp2cli.cache_key_for(url)
+        (cd / f"{cache_key}.json").write_text('{"broken":', encoding="utf-8")
+
+        r = _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
+
+        assert r.returncode == 0
+        assert CountingHandler.spec_fetch_count == 1
+        repaired = json.loads((cd / f"{cache_key}.json").read_text(encoding="utf-8"))
+        assert "/pets" in repaired["paths"]
 
     def test_local_file_not_cached(self, tmp_path):
         """Loading from a local file should not create cache entries."""
@@ -155,8 +240,14 @@ class TestOpenAPICaching:
         spec_file = tmp_path / "petstore.json"
         spec_file.write_text(json.dumps(PETSTORE_SPEC))
 
-        r = _run_cli("--spec", str(spec_file), "--base-url", "http://unused",
-                      "--list", cache_dir=cd)
+        r = _run_cli(
+            "--spec",
+            str(spec_file),
+            "--base-url",
+            "http://unused",
+            "--list",
+            cache_dir=cd,
+        )
         assert r.returncode == 0
         # No cache files should be created for local files
         if cd.exists():
@@ -177,21 +268,33 @@ class TestOpenAPICaching:
         r = _run_cli("--spec", url, "--base-url", base, "list-pets", cache_dir=cd)
         assert r.returncode == 0
         assert CountingHandler.spec_fetch_count == 1  # still 1
-        assert CountingHandler.api_call_count == 1    # but API was called
+        assert CountingHandler.api_call_count == 1  # but API was called
 
     def test_different_urls_different_cache(self, counting_server, tmp_path):
         """Different spec URLs should not share cache entries."""
         cd = tmp_path / "cache"
         url = f"{counting_server}/openapi.json"
 
-        _run_cli("--spec", url, "--base-url", f"{counting_server}/api/v1",
-                 "--list", cache_dir=cd)
+        _run_cli(
+            "--spec",
+            url,
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 1
 
         # Same server, different path — should not reuse cache
         # (it would 404, but the point is it tries to fetch)
-        r = _run_cli("--spec", url + "?v=2", "--base-url", f"{counting_server}/api/v1",
-                      "--list", cache_dir=cd)
+        r = _run_cli(
+            "--spec",
+            url + "?v=2",
+            "--base-url",
+            f"{counting_server}/api/v1",
+            "--list",
+            cache_dir=cd,
+        )
         assert CountingHandler.spec_fetch_count == 2
 
 
@@ -202,8 +305,10 @@ class TestMCPStdioCaching:
 
     def _run_mcp(self, *args, cache_dir=None):
         return _run_cli(
-            "--mcp-stdio", f"{sys.executable} {self.MCP_SERVER}",
-            *args, cache_dir=cache_dir,
+            "--mcp-stdio",
+            f"{sys.executable} {self.MCP_SERVER}",
+            *args,
+            cache_dir=cache_dir,
         )
 
     def test_tool_list_cached(self, tmp_path):
@@ -270,6 +375,8 @@ class TestMCPStdioCaching:
         os.utime(tools_files[0], (old, old))
 
         # With short TTL, should re-fetch
-        r = self._run_mcp("--cache-ttl", "1", "echo", "--message", "refreshed", cache_dir=cd)
+        r = self._run_mcp(
+            "--cache-ttl", "1", "echo", "--message", "refreshed", cache_dir=cd
+        )
         assert r.returncode == 0
         assert "refreshed" in r.stdout
