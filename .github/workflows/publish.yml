@@ -2,7 +2,8 @@ name: Publish to PyPI
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -11,6 +12,10 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: astral-sh/setup-uv@v5
+
+      - run: uv sync --extra test
+
+      - run: uv run pytest tests/ -v
 
       - run: uv build
 
