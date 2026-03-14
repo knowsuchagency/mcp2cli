@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-__version__ = "1.4.0"
+__version__ = "2.0.0"
 
 import argparse
 import copy
 import hashlib
 import json
 import os
+import fnmatch
 import re
 import shlex
 import shutil
@@ -31,6 +32,10 @@ CACHE_DIR = Path(
     os.environ.get("MCP2CLI_CACHE_DIR", Path.home() / ".cache" / "mcp2cli")
 )
 DEFAULT_CACHE_TTL = 3600
+CONFIG_DIR = Path(
+    os.environ.get("MCP2CLI_CONFIG_DIR", Path.home() / ".config" / "mcp2cli")
+)
+BAKED_FILE = CONFIG_DIR / "baked.json"
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +70,13 @@ class CommandDef:
     graphql_operation_type: str | None = None  # "query" or "mutation"
     graphql_field_name: str | None = None      # original field name pre-kebab
     graphql_return_type: dict | None = None    # return type info for selection set
+
+
+@dataclass
+class BakeConfig:
+    include: list[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1115,350 @@ def handle_graphql(
 
 
 # ---------------------------------------------------------------------------
+# Command filtering (bake mode)
+# ---------------------------------------------------------------------------
+
+
+def filter_commands(
+    commands: list[CommandDef],
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    methods: list[str] | None = None,
+) -> list[CommandDef]:
+    """Filter commands by HTTP method, include whitelist, and exclude blacklist.
+
+    Order: methods filter -> include whitelist -> exclude blacklist.
+    MCP commands (method is None) pass the methods filter unchanged.
+    """
+    result = commands
+    if methods:
+        upper = [m.upper() for m in methods]
+        result = [c for c in result if c.method is None or c.method.upper() in upper]
+    if include:
+        result = [
+            c for c in result
+            if any(fnmatch.fnmatch(c.name, pat) for pat in include)
+        ]
+    if exclude:
+        result = [
+            c for c in result
+            if not any(fnmatch.fnmatch(c.name, pat) for pat in exclude)
+        ]
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Baked config CRUD
+# ---------------------------------------------------------------------------
+
+
+def _load_baked_all() -> dict:
+    """Load all baked configs from disk."""
+    if not BAKED_FILE.exists():
+        return {}
+    try:
+        return json.loads(BAKED_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _load_baked(name: str) -> dict | None:
+    """Load a single baked config by name."""
+    return _load_baked_all().get(name)
+
+
+def _save_baked_all(data: dict) -> None:
+    """Save all baked configs to disk."""
+    BAKED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BAKED_FILE.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def _baked_to_argv(config: dict) -> list[str]:
+    """Reconstruct CLI argv from a baked config."""
+    argv: list[str] = []
+    st = config.get("source_type", "spec")
+    source = config["source"]
+    if st == "spec":
+        argv += ["--spec", source]
+    elif st == "mcp":
+        argv += ["--mcp", source]
+    elif st == "mcp_stdio":
+        argv += ["--mcp-stdio", source]
+
+    if config.get("base_url"):
+        argv += ["--base-url", config["base_url"]]
+    for name, value in config.get("auth_headers", []):
+        argv += ["--auth-header", f"{name}:{value}"]
+    for k, v in config.get("env_vars", {}).items():
+        argv += ["--env", f"{k}={v}"]
+    if config.get("cache_ttl") is not None:
+        argv += ["--cache-ttl", str(config["cache_ttl"])]
+    transport = config.get("transport", "auto")
+    if transport != "auto":
+        argv += ["--transport", transport]
+    if config.get("oauth"):
+        argv.append("--oauth")
+    if config.get("oauth_client_id"):
+        argv += ["--oauth-client-id", config["oauth_client_id"]]
+    if config.get("oauth_client_secret"):
+        argv += ["--oauth-client-secret", config["oauth_client_secret"]]
+    if config.get("oauth_scope"):
+        argv += ["--oauth-scope", config["oauth_scope"]]
+    return argv
+
+
+# ---------------------------------------------------------------------------
+# Bake subcommands
+# ---------------------------------------------------------------------------
+
+_BAKE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def _handle_bake(argv: list[str]) -> None:
+    """Dispatch bake subcommands."""
+    if not argv:
+        print("Usage: mcp2cli bake <create|list|show|remove|update|install> ...")
+        sys.exit(1)
+    sub = argv[0]
+    rest = argv[1:]
+    dispatch = {
+        "create": _bake_create,
+        "list": lambda _: _bake_list(),
+        "show": _bake_show,
+        "remove": _bake_remove,
+        "update": _bake_update,
+        "install": _bake_install,
+    }
+    handler = dispatch.get(sub)
+    if handler is None:
+        print(f"Unknown bake subcommand: {sub}", file=sys.stderr)
+        sys.exit(1)
+    handler(rest)
+
+
+def _bake_create(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="mcp2cli bake create")
+    p.add_argument("name", help="Name for the baked tool")
+    p.add_argument("--spec", default=None)
+    p.add_argument("--mcp", default=None)
+    p.add_argument("--mcp-stdio", default=None)
+    p.add_argument("--base-url", default=None)
+    p.add_argument("--auth-header", action="append", default=[])
+    p.add_argument("--env", action="append", default=[])
+    p.add_argument("--cache-ttl", type=int, default=DEFAULT_CACHE_TTL)
+    p.add_argument("--transport", choices=["auto", "sse", "streamable"], default="auto")
+    p.add_argument("--oauth", action="store_true")
+    p.add_argument("--oauth-client-id", default=None)
+    p.add_argument("--oauth-client-secret", default=None)
+    p.add_argument("--oauth-scope", default=None)
+    p.add_argument("--include", default="", help="Comma-separated include globs")
+    p.add_argument("--exclude", default="", help="Comma-separated exclude globs")
+    p.add_argument("--methods", default="", help="Comma-separated HTTP methods")
+    p.add_argument("--description", default="")
+    p.add_argument("--force", action="store_true", help="Overwrite existing")
+    args = p.parse_args(argv)
+
+    if not _BAKE_NAME_RE.match(args.name):
+        print(
+            f"Error: invalid name {args.name!r} — must match [a-z][a-z0-9-]*",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    modes = [args.spec, args.mcp, args.mcp_stdio]
+    active = sum(1 for m in modes if m is not None)
+    if active == 0:
+        print("Error: one of --spec, --mcp, or --mcp-stdio is required.", file=sys.stderr)
+        sys.exit(1)
+    if active > 1:
+        print("Error: --spec, --mcp, and --mcp-stdio are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    all_configs = _load_baked_all()
+    if args.name in all_configs and not args.force:
+        print(
+            f"Error: '{args.name}' already exists. Use --force to overwrite.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.spec:
+        source_type, source = "spec", args.spec
+    elif args.mcp:
+        source_type, source = "mcp", args.mcp
+    else:
+        source_type, source = "mcp_stdio", args.mcp_stdio
+
+    auth_headers = []
+    for h in args.auth_header:
+        if ":" not in h:
+            print(f"Error: invalid auth header format: {h!r}", file=sys.stderr)
+            sys.exit(1)
+        name, value = h.split(":", 1)
+        auth_headers.append([name.strip(), value.strip()])
+
+    env_vars = {}
+    for e in args.env:
+        if "=" not in e:
+            print(f"Error: invalid env format: {e!r}", file=sys.stderr)
+            sys.exit(1)
+        k, v = e.split("=", 1)
+        env_vars[k] = v
+
+    config = {
+        "source_type": source_type,
+        "source": source,
+        "base_url": args.base_url,
+        "auth_headers": auth_headers,
+        "env_vars": env_vars,
+        "cache_ttl": args.cache_ttl,
+        "transport": args.transport,
+        "oauth": args.oauth,
+        "oauth_client_id": args.oauth_client_id,
+        "oauth_client_secret": args.oauth_client_secret,
+        "oauth_scope": args.oauth_scope,
+        "include": [x.strip() for x in args.include.split(",") if x.strip()],
+        "exclude": [x.strip() for x in args.exclude.split(",") if x.strip()],
+        "methods": [x.strip().upper() for x in args.methods.split(",") if x.strip()],
+        "description": args.description,
+    }
+
+    all_configs[args.name] = config
+    _save_baked_all(all_configs)
+    print(f"Baked tool '{args.name}' created.")
+
+
+def _bake_list() -> None:
+    configs = _load_baked_all()
+    if not configs:
+        print("No baked tools.")
+        return
+    print(f"{'Name':<20} {'Type':<10} {'Source':<50}")
+    print("-" * 80)
+    for name, cfg in sorted(configs.items()):
+        st = cfg.get("source_type", "?")
+        src = cfg.get("source", "?")
+        if len(src) > 48:
+            src = src[:45] + "..."
+        print(f"{name:<20} {st:<10} {src:<50}")
+
+
+def _bake_show(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="mcp2cli bake show")
+    p.add_argument("name")
+    args = p.parse_args(argv)
+    cfg = _load_baked(args.name)
+    if cfg is None:
+        print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+    # Mask secrets in auth headers for display
+    display = dict(cfg)
+    if display.get("auth_headers"):
+        masked = []
+        for name, val in display["auth_headers"]:
+            if val.startswith("env:") or val.startswith("file:"):
+                masked.append([name, val])
+            else:
+                masked.append([name, val[:4] + "****" if len(val) > 4 else "****"])
+        display["auth_headers"] = masked
+    print(json.dumps(display, indent=2))
+
+
+def _bake_remove(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="mcp2cli bake remove")
+    p.add_argument("name")
+    args = p.parse_args(argv)
+    all_configs = _load_baked_all()
+    if args.name not in all_configs:
+        print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+    del all_configs[args.name]
+    _save_baked_all(all_configs)
+    # Clean up any installed wrapper
+    wrapper = Path.home() / ".local" / "bin" / args.name
+    if wrapper.exists():
+        wrapper.unlink()
+        print(f"Removed installed wrapper: {wrapper}")
+    print(f"Baked tool '{args.name}' removed.")
+
+
+def _bake_update(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="mcp2cli bake update")
+    p.add_argument("name")
+    p.add_argument("--cache-ttl", type=int, default=None)
+    p.add_argument("--include", default=None)
+    p.add_argument("--exclude", default=None)
+    p.add_argument("--methods", default=None)
+    p.add_argument("--description", default=None)
+    p.add_argument("--base-url", default=None)
+    p.add_argument("--transport", choices=["auto", "sse", "streamable"], default=None)
+    args = p.parse_args(argv)
+    all_configs = _load_baked_all()
+    if args.name not in all_configs:
+        print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+    cfg = all_configs[args.name]
+    if args.cache_ttl is not None:
+        cfg["cache_ttl"] = args.cache_ttl
+    if args.include is not None:
+        cfg["include"] = [x.strip() for x in args.include.split(",") if x.strip()]
+    if args.exclude is not None:
+        cfg["exclude"] = [x.strip() for x in args.exclude.split(",") if x.strip()]
+    if args.methods is not None:
+        cfg["methods"] = [x.strip().upper() for x in args.methods.split(",") if x.strip()]
+    if args.description is not None:
+        cfg["description"] = args.description
+    if args.base_url is not None:
+        cfg["base_url"] = args.base_url
+    if args.transport is not None:
+        cfg["transport"] = args.transport
+    _save_baked_all(all_configs)
+    print(f"Baked tool '{args.name}' updated.")
+
+
+def _bake_install(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="mcp2cli bake install")
+    p.add_argument("name")
+    args = p.parse_args(argv)
+    cfg = _load_baked(args.name)
+    if cfg is None:
+        print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+    bin_dir = Path.home() / ".local" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bin_dir / args.name
+    # Resolve mcp2cli path
+    mcp2cli_bin = shutil.which("mcp2cli") or "mcp2cli"
+    wrapper.write_text(
+        f"#!/bin/sh\nexec {shlex.quote(mcp2cli_bin)} @{args.name} \"$@\"\n"
+    )
+    wrapper.chmod(0o755)
+    print(f"Installed wrapper: {wrapper}")
+    if str(bin_dir) not in os.environ.get("PATH", ""):
+        print(f"  Note: {bin_dir} may not be in your PATH")
+
+
+# ---------------------------------------------------------------------------
+# Run a baked tool
+# ---------------------------------------------------------------------------
+
+
+def _run_baked(name: str, argv: list[str]) -> None:
+    """Load a baked config and run it."""
+    cfg = _load_baked(name)
+    if cfg is None:
+        print(f"Error: no baked tool named '{name}'", file=sys.stderr)
+        sys.exit(1)
+    synthetic_argv = _baked_to_argv(cfg) + list(argv)
+    bake_config = BakeConfig(
+        include=cfg.get("include", []),
+        exclude=cfg.get("exclude", []),
+        methods=cfg.get("methods", []),
+    )
+    _main_impl(synthetic_argv, bake_config=bake_config)
+
+
+# ---------------------------------------------------------------------------
 # CLI builder
 # ---------------------------------------------------------------------------
 
@@ -2052,6 +2408,7 @@ def handle_mcp(
     prompt_name: str | None = None,
     prompt_arguments: dict | None = None,
     search_pattern: str | None = None,
+    bake_config: BakeConfig | None = None,
 ):
     key = cache_key_override or cache_key_for(source)
 
@@ -2099,6 +2456,26 @@ def handle_mcp(
         return
 
     if list_mode:
+        if bake_config and (bake_config.include or bake_config.exclude or bake_config.methods):
+            # Fetch tools, filter, then list — don't delegate to unfiltered path
+            cached_tools = None
+            if not refresh:
+                cached_tools = load_cached(f"{key}_tools", ttl)
+            if cached_tools is not None:
+                tools = cached_tools
+            else:
+                tools = _fetch_mcp_tools(
+                    source, is_stdio, auth_headers, env_vars,
+                    transport=transport, oauth_provider=oauth_provider,
+                )
+                save_cache(f"{key}_tools", tools)
+            commands = extract_mcp_commands(tools)
+            commands = filter_commands(
+                commands, bake_config.include, bake_config.exclude, bake_config.methods,
+            )
+            print("\nAvailable tools:")
+            list_mcp_commands(commands)
+            return
         if is_stdio:
             run_mcp_stdio(
                 source,
@@ -2153,6 +2530,10 @@ def handle_mcp(
         save_cache(f"{key}_tools", tools)
 
     commands = extract_mcp_commands(tools)
+    if bake_config:
+        commands = filter_commands(
+            commands, bake_config.include, bake_config.exclude, bake_config.methods,
+        )
 
     if not remaining:
         print("Available tools:")
@@ -2335,6 +2716,18 @@ def _split_at_subcommand(
 
 
 def main():
+    if len(sys.argv) > 1:
+        first = sys.argv[1]
+        if first == "bake":
+            _handle_bake(sys.argv[2:])
+            return
+        if first.startswith("@"):
+            _run_baked(first[1:], sys.argv[2:])
+            return
+    _main_impl(sys.argv[1:])
+
+
+def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
     pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("--spec", default=None, help="OpenAPI spec URL or file path")
     pre.add_argument("--mcp", default=None, help="MCP server URL (HTTP/SSE)")
@@ -2460,7 +2853,7 @@ def main():
     # Split argv at the subcommand boundary so that tool parameters whose
     # names collide with global options (e.g. --env, --refresh) are not
     # silently consumed by the pre-parser.  See GH #15.
-    global_argv, tool_argv = _split_at_subcommand(sys.argv[1:], pre)
+    global_argv, tool_argv = _split_at_subcommand(argv, pre)
     pre_args, leftover = pre.parse_known_args(global_argv)
     remaining = leftover + tool_argv
 
@@ -2763,6 +3156,7 @@ def main():
             prompt_name=prompt_name,
             prompt_arguments=prompt_arguments,
             search_pattern=search_pattern,
+            bake_config=bake_config,
         )
         return
 
@@ -2775,6 +3169,10 @@ def main():
         pre_args.refresh,
     )
     commands = extract_openapi_commands(spec)
+    if bake_config:
+        commands = filter_commands(
+            commands, bake_config.include, bake_config.exclude, bake_config.methods,
+        )
 
     if pre_args.list_commands:
         if search_pattern:

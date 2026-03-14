@@ -5,7 +5,7 @@
 <h1 align="center">mcp2cli</h1>
 
 <p align="center">
-  Turn any MCP server or OpenAPI spec into a CLI — at runtime, with zero codegen.<br>
+  Turn any MCP server, OpenAPI spec, or GraphQL endpoint into a CLI — at runtime, with zero codegen.<br>
   <strong>Save 96–99% of the tokens wasted on tool schemas every turn.</strong><br><br>
   <a href="https://www.orangecountyai.com/blog/mcp2cli-one-cli-for-every-api-zero-wasted-tokens"><strong>Read the full writeup →</strong></a>
 </p>
@@ -131,6 +131,121 @@ echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --
 mcp2cli --spec ./api.yaml --base-url http://localhost:8000 --list
 ```
 
+### GraphQL mode
+
+```bash
+# List all queries and mutations from a GraphQL endpoint
+mcp2cli --graphql https://api.example.com/graphql --list
+
+# Call a query
+mcp2cli --graphql https://api.example.com/graphql users --limit 10
+
+# Call a mutation
+mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --email "alice@example.com"
+
+# Override auto-generated selection set fields
+mcp2cli --graphql https://api.example.com/graphql users --fields "id name email"
+
+# With auth
+mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:Bearer tok_..." users
+```
+
+mcp2cli introspects the endpoint, discovers queries and mutations, auto-generates selection sets, and constructs parameterized queries with proper variable declarations. Here's what that looks like in practice:
+
+**GraphQL schema:**
+
+```graphql
+type Query {
+  users: [User!]!
+  user(id: ID!): User
+}
+
+type Mutation {
+  createUser(name: String!, email: String!, age: Int): User
+  deleteUser(id: ID!): Boolean
+}
+
+type User {
+  id: ID!
+  name: String!
+  email: String
+  age: Int
+  status: Status
+}
+
+enum Status { ACTIVE INACTIVE BANNED }
+```
+
+**What mcp2cli generates:**
+
+```
+$ mcp2cli --graphql https://api.example.com/graphql --list
+
+query:
+  users                                          List all users
+  user                                           Get a user by ID
+
+mutation:
+  create-user                                    Create a new user
+  delete-user                                    Delete a user by ID
+
+$ mcp2cli --graphql https://api.example.com/graphql create-user --help
+usage: mcp2cli create-user [--name NAME] [--email EMAIL] [--age AGE]
+
+  --name    User name (String!, required)
+  --email   User email (String!, required)
+  --age     User age (Int)
+
+$ mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --email "alice@co.org"
+{"id": "4", "name": "Alice", "email": "alice@co.org", "age": null, "status": null}
+```
+
+No SDL parsing, no code generation — just point and run.
+
+### Tool search
+
+```bash
+# Search tools by name or description (case-insensitive substring match)
+mcp2cli --mcp https://mcp.example.com/sse --search "task"
+mcp2cli --spec ./openapi.json --search "create"
+mcp2cli --mcp-stdio "npx @mcp/server" --search "deploy"
+```
+
+`--search` implies `--list` — it filters the tool listing to matching results.
+
+### Bake mode — save connection settings
+
+Tired of repeating `--spec`/`--mcp`/`--mcp-stdio` plus auth flags on every invocation? Bake them into a named configuration:
+
+```bash
+# Create a baked tool from an OpenAPI spec
+mcp2cli bake create petstore --spec https://api.example.com/spec.json \
+  --exclude "delete-*,update-*" --methods GET,POST --cache-ttl 7200
+
+# Create a baked tool from an MCP stdio server
+mcp2cli bake create mygit --mcp-stdio "npx @mcp/github" \
+  --include "search-*,list-*" --exclude "delete-*"
+
+# Use a baked tool with @ prefix — no connection flags needed
+mcp2cli @petstore --list
+mcp2cli @petstore list-pets --limit 10
+mcp2cli @mygit search-repos --query "rust"
+
+# Manage baked tools
+mcp2cli bake list                         # show all baked tools
+mcp2cli bake show petstore                # show config (secrets masked)
+mcp2cli bake update petstore --cache-ttl 3600
+mcp2cli bake remove petstore
+mcp2cli bake install petstore             # creates ~/.local/bin/petstore wrapper
+```
+
+Filtering options:
+- `--include` — comma-separated glob patterns to whitelist tools (e.g. `"list-*,get-*"`)
+- `--exclude` — comma-separated glob patterns to blacklist tools (e.g. `"delete-*"`)
+- `--methods` — comma-separated HTTP methods to allow (e.g. `"GET,POST"`, OpenAPI only)
+
+Configs are stored in `~/.config/mcp2cli/baked.json`. Override with `MCP2CLI_CONFIG_DIR`.
+
 ### Output control
 
 ```bash
@@ -177,6 +292,7 @@ Source (mutually exclusive, one required):
   --spec URL|FILE       OpenAPI spec (JSON or YAML, local or remote)
   --mcp URL             MCP server URL (HTTP/SSE)
   --mcp-stdio CMD       MCP server command (stdio transport)
+  --graphql URL         GraphQL endpoint URL
 
 Options:
   --auth-header K:V       HTTP header (repeatable, value supports env:/file: prefixes)
@@ -191,10 +307,21 @@ Options:
   --cache-ttl SECONDS     Cache TTL (default: 3600)
   --refresh               Bypass cache
   --list                  List available subcommands
+  --search PATTERN        Search tools by name or description (implies --list)
+  --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
   --toon                  Encode output as TOON (token-efficient for LLMs)
   --version               Show version
+
+Bake mode:
+  bake create NAME [opts]   Save connection settings as a named tool
+  bake list                 List all baked tools
+  bake show NAME            Show config (secrets masked)
+  bake update NAME [opts]   Update a baked tool
+  bake remove NAME          Delete a baked tool
+  bake install NAME         Create ~/.local/bin wrapper script
+  @NAME [args]              Run a baked tool (e.g. mcp2cli @petstore --list)
 ```
 
 Subcommands and their flags are generated dynamically from the spec or MCP server tool definitions. Run `<subcommand> --help` for details.
@@ -216,7 +343,7 @@ The idea is simple: give the LLM a CLI instead of raw tool schemas, and let it `
 - **No codegen, no recompilation.** Point mcp2cli at a spec URL or MCP server and the CLI exists immediately. When the server adds new endpoints, they appear on the next invocation — no rebuild step, no generated code to commit.
 - **Provider-agnostic.** Tool Search is an Anthropic API feature. mcp2cli works with any LLM — Claude, GPT, Gemini, local models — because it's just a CLI tool the model can shell out to.
 - **Compact discovery.** Tool Search defers loading but still injects full JSON schemas when a tool is fetched (~121 tokens/tool). mcp2cli's `--help` returns human-readable text that's typically cheaper than the raw schema, and `--list` summaries cost ~16 tokens/tool vs ~121 for native schemas.
-- **OpenAPI support.** MCP isn't the only schema-rich protocol. mcp2cli handles OpenAPI specs (JSON or YAML, local or remote) with the same CLI interface, the same caching, and the same on-demand discovery. One tool for both worlds.
+- **OpenAPI and GraphQL support.** MCP isn't the only schema-rich protocol. mcp2cli handles OpenAPI specs (JSON or YAML, local or remote) and GraphQL endpoints (via introspection) with the same CLI interface, the same caching, and the same on-demand discovery. One tool for all three worlds.
 - **Spec caching with TTL control.** Fetched specs and MCP tool lists are cached locally with configurable TTL, so repeated invocations don't hit the network. `--refresh` bypasses the cache when you need it.
 
 ## The numbers: how much context do you actually save?

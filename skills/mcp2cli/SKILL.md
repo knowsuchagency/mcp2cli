@@ -1,11 +1,11 @@
 ---
 name: mcp2cli
-description: Turn any MCP server or OpenAPI spec into a CLI. Use this skill when the user wants to interact with an MCP server or OpenAPI/REST API via command line, discover available tools/endpoints, call API operations, or generate a new skill from an API. Triggers include "mcp2cli", "call this MCP server", "use this API", "list tools from", "create a skill for this API", or any task involving MCP tool invocation or OpenAPI endpoint calls without writing code.
+description: Turn any MCP server, OpenAPI spec, or GraphQL endpoint into a CLI. Use this skill when the user wants to interact with an MCP server, OpenAPI/REST API, or GraphQL API via command line, discover available tools/endpoints, call API operations, or generate a new skill from an API. Triggers include "mcp2cli", "call this MCP server", "use this API", "list tools from", "create a skill for this API", "graphql", or any task involving MCP tool invocation, OpenAPI endpoint calls, or GraphQL queries without writing code.
 ---
 
 # mcp2cli
 
-Turn any MCP server or OpenAPI spec into a CLI at runtime. No codegen.
+Turn any MCP server, OpenAPI spec, or GraphQL endpoint into a CLI at runtime. No codegen.
 
 ## Install
 
@@ -19,8 +19,8 @@ pip install mcp2cli
 
 ## Core Workflow
 
-1. **Connect** to a source (MCP server or OpenAPI spec)
-2. **Discover** available commands with `--list`
+1. **Connect** to a source (MCP server, OpenAPI spec, or GraphQL endpoint)
+2. **Discover** available commands with `--list` (or filter with `--search`)
 3. **Inspect** a specific command with `<command> --help`
 4. **Execute** the command with flags
 
@@ -37,6 +37,11 @@ mcp2cli --mcp-stdio "npx @modelcontextprotocol/server-filesystem /tmp" read-file
 # OpenAPI spec (remote or local, JSON or YAML)
 mcp2cli --spec https://petstore3.swagger.io/api/v3/openapi.json --list
 mcp2cli --spec ./openapi.json --base-url https://api.example.com list-pets --status available
+
+# GraphQL endpoint
+mcp2cli --graphql https://api.example.com/graphql --list
+mcp2cli --graphql https://api.example.com/graphql users --limit 10
+mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice"
 ```
 
 ## CLI Reference
@@ -48,6 +53,7 @@ Source (mutually exclusive, one required):
   --spec URL|FILE       OpenAPI spec (JSON or YAML, local or remote)
   --mcp URL             MCP server URL (HTTP/SSE)
   --mcp-stdio CMD       MCP server command (stdio transport)
+  --graphql URL         GraphQL endpoint URL
 
 Options:
   --auth-header K:V       HTTP header (repeatable, value supports env:/file: prefixes)
@@ -62,10 +68,21 @@ Options:
   --cache-ttl SECONDS     Cache TTL (default: 3600)
   --refresh               Bypass cache
   --list                  List available subcommands
+  --search PATTERN        Search tools by name or description (implies --list)
+  --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
   --toon                  Encode output as TOON (token-efficient for LLMs)
   --version               Show version
+
+Bake mode:
+  bake create NAME [opts]   Save connection settings as a named tool
+  bake list                 List all baked tools
+  bake show NAME            Show config (secrets masked)
+  bake update NAME [opts]   Update a baked tool
+  bake remove NAME          Delete a baked tool
+  bake install NAME         Create ~/.local/bin wrapper script
+  @NAME [args]              Run a baked tool (e.g. mcp2cli @petstore --list)
 ```
 
 Subcommands and flags are generated dynamically from the source.
@@ -119,6 +136,36 @@ mcp2cli --mcp https://mcp.example.com/sse --transport sse --list
 mcp2cli --mcp https://mcp.example.com/sse --transport streamable --list
 ```
 
+### GraphQL
+
+```bash
+# Discover queries and mutations
+mcp2cli --graphql https://api.example.com/graphql --list
+
+# Run a query
+mcp2cli --graphql https://api.example.com/graphql users --limit 10
+
+# Run a mutation
+mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --email "alice@example.com"
+
+# Override auto-generated selection set
+mcp2cli --graphql https://api.example.com/graphql users --fields "id name email"
+
+# With auth
+mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:Bearer tok_..." users
+```
+
+### Tool search
+
+```bash
+# Filter tools by name or description (case-insensitive)
+mcp2cli --mcp https://mcp.example.com/sse --search "task"
+mcp2cli --spec ./openapi.json --search "create"
+mcp2cli --graphql https://api.example.com/graphql --search "user"
+```
+
+`--search` implies `--list` — shows only matching tools.
+
 ### POST with JSON body from stdin
 
 ```bash
@@ -130,6 +177,34 @@ echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --
 ```bash
 mcp2cli --mcp-stdio "node server.js" --env API_KEY=sk-... --env DEBUG=1 search --query "test"
 ```
+
+### Bake mode — saved configurations
+
+Save connection settings as named configurations to avoid repeating flags:
+
+```bash
+# Create a baked tool
+mcp2cli bake create petstore --spec https://api.example.com/spec.json \
+  --exclude "delete-*,update-*" --methods GET,POST --cache-ttl 7200
+
+mcp2cli bake create mygit --mcp-stdio "npx @mcp/github" \
+  --include "search-*,list-*" --exclude "delete-*"
+
+# Use with @ prefix
+mcp2cli @petstore --list
+mcp2cli @petstore list-pets --limit 10
+
+# Manage
+mcp2cli bake list
+mcp2cli bake show petstore
+mcp2cli bake update petstore --cache-ttl 3600
+mcp2cli bake remove petstore
+mcp2cli bake install petstore    # creates ~/.local/bin/petstore wrapper
+```
+
+Filter options: `--include` (glob whitelist), `--exclude` (glob blacklist), `--methods` (HTTP methods, OpenAPI only).
+
+Configs stored in `~/.config/mcp2cli/baked.json` (override with `MCP2CLI_CONFIG_DIR`).
 
 ### Caching
 
@@ -150,7 +225,7 @@ Best for large uniform arrays — 40-60% fewer tokens than JSON.
 
 ## Generating a Skill from an API
 
-When the user asks to create a skill from an MCP server or OpenAPI spec, follow this workflow:
+When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQL endpoint, follow this workflow:
 
 1. **Discover** all available commands:
    ```bash
@@ -168,7 +243,7 @@ When the user asks to create a skill from an MCP server or OpenAPI spec, follow 
    ```
 
 4. **Create a SKILL.md** that teaches another AI agent how to use this API via mcp2cli. Include:
-   - The source flag (`--mcp`, `--mcp-stdio`, or `--spec`) and URL
+   - The source flag (`--mcp`, `--mcp-stdio`, `--spec`, or `--graphql`) and URL
    - Any required auth headers
    - Common workflows with example commands
    - The `--list` and `--help` discovery pattern for commands not covered
