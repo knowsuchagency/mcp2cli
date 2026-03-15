@@ -371,7 +371,7 @@ def build_oauth_provider(
     client_secret: str | None = None,
     scope: str | None = None,
 ) -> "httpx.Auth":
-    """Build an OAuth provider for MCP HTTP connections.
+    """Build an OAuth provider for HTTP connections.
 
     If client_id and client_secret are provided, uses client credentials flow.
     Otherwise, uses authorization code + PKCE with a local callback server.
@@ -482,6 +482,7 @@ def load_openapi_spec(
     cache_key: str | None,
     ttl: int,
     refresh: bool,
+    oauth_provider: "httpx.Auth | None" = None,
 ) -> dict:
     is_url = source.startswith("http://") or source.startswith("https://")
 
@@ -493,7 +494,7 @@ def load_openapi_spec(
                 return cached
 
         headers = dict(auth_headers)
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=30, auth=oauth_provider) as client:
             resp = client.get(source, headers=headers)
             resp.raise_for_status()
             raw = resp.text
@@ -840,6 +841,7 @@ def load_graphql_schema(
     cache_key: str | None,
     ttl: int,
     refresh: bool,
+    oauth_provider: "httpx.Auth | None" = None,
 ) -> dict:
     """POST introspection query to a GraphQL endpoint, with caching."""
     key = cache_key or cache_key_for(f"graphql:{url}")
@@ -850,7 +852,7 @@ def load_graphql_schema(
 
     headers = dict(auth_headers)
     headers.setdefault("Content-Type", "application/json")
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=30, auth=oauth_provider) as client:
         resp = client.post(
             url,
             headers=headers,
@@ -999,6 +1001,7 @@ def execute_graphql(
     raw: bool,
     toon: bool = False,
     fields_override: str | None = None,
+    oauth_provider: "httpx.Auth | None" = None,
 ):
     """Build and execute a GraphQL query/mutation."""
     types_by_name = {t["name"]: t for t in schema.get("types", []) if t.get("name")}
@@ -1044,7 +1047,7 @@ def execute_graphql(
     headers = dict(auth_headers)
     headers.setdefault("Content-Type", "application/json")
 
-    with httpx.Client(timeout=60) as client:
+    with httpx.Client(timeout=60, auth=oauth_provider) as client:
         resp = client.post(
             url,
             headers=headers,
@@ -1084,9 +1087,10 @@ def handle_graphql(
     refresh: bool,
     toon: bool = False,
     fields_override: str | None = None,
+    oauth_provider: "httpx.Auth | None" = None,
 ):
     """Top-level handler for --graphql mode."""
-    schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh)
+    schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider)
     commands = extract_graphql_commands(schema)
 
     if list_mode:
@@ -1110,7 +1114,7 @@ def handle_graphql(
     cmd: CommandDef = args._cmd
     execute_graphql(
         args, cmd, url, schema, auth_headers, pretty, raw, toon=toon,
-        fields_override=fields_override,
+        fields_override=fields_override, oauth_provider=oauth_provider,
     )
 
 
@@ -1565,6 +1569,7 @@ def execute_openapi(
     pretty: bool,
     raw: bool,
     toon: bool = False,
+    oauth_provider: "httpx.Auth | None" = None,
 ):
     path = cmd.path or ""
     # Substitute path parameters
@@ -1616,7 +1621,7 @@ def execute_openapi(
             if not body:
                 body = None
 
-    with httpx.Client(timeout=60) as client:
+    with httpx.Client(timeout=60, auth=oauth_provider) as client:
         resp = client.request(
             (cmd.method or "get").upper(),
             url,
@@ -2930,9 +2935,22 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
                 file=sys.stderr,
             )
             sys.exit(1)
-        if not pre_args.mcp:
+        if pre_args.mcp_stdio:
             print(
-                "Error: OAuth is only supported with --mcp (HTTP/SSE)", file=sys.stderr
+                "Error: OAuth is not supported with --mcp-stdio", file=sys.stderr
+            )
+            sys.exit(1)
+        # Determine OAuth server URL for discovery
+        server_url = pre_args.mcp or pre_args.graphql
+        if not server_url and pre_args.spec:
+            if pre_args.spec.startswith("http"):
+                server_url = pre_args.spec
+            else:
+                server_url = pre_args.base_url
+        if not server_url:
+            print(
+                "Error: OAuth requires an HTTP URL (use --base-url with local spec files)",
+                file=sys.stderr,
             )
             sys.exit(1)
         client_id = (
@@ -2946,7 +2964,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             else None
         )
         oauth_provider = build_oauth_provider(
-            pre_args.mcp,
+            server_url,
             client_id=client_id,
             client_secret=client_secret,
             scope=pre_args.oauth_scope,
@@ -3129,6 +3147,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             pre_args.refresh,
             toon=pre_args.toon,
             fields_override=pre_args.fields,
+            oauth_provider=oauth_provider,
         )
         return
 
@@ -3168,6 +3187,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
         pre_args.cache_key,
         pre_args.cache_ttl,
         pre_args.refresh,
+        oauth_provider=oauth_provider,
     )
     commands = extract_openapi_commands(spec)
     if bake_config:
@@ -3229,6 +3249,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
         pre_args.pretty,
         pre_args.raw,
         toon=pre_args.toon,
+        oauth_provider=oauth_provider,
     )
 
 

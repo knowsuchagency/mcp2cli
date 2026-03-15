@@ -58,21 +58,26 @@ mcp2cli --mcp https://mcp.example.com/sse --search "task"
 
 ### OAuth authentication
 
-MCP servers that require OAuth are supported out of the box. mcp2cli handles token acquisition,
-caching, and refresh automatically.
+APIs that require OAuth are supported out of the box — across MCP, OpenAPI, and GraphQL modes.
+mcp2cli handles token acquisition, caching, and refresh automatically.
 
 ```bash
 # Authorization code + PKCE flow (opens browser for login)
 mcp2cli --mcp https://mcp.example.com/sse --oauth --list
+mcp2cli --spec https://api.example.com/openapi.json --oauth --list
+mcp2cli --graphql https://api.example.com/graphql --oauth --list
 
 # Client credentials flow (machine-to-machine, no browser)
-mcp2cli --mcp https://mcp.example.com/sse \
+mcp2cli --spec https://api.example.com/openapi.json \
   --oauth-client-id "my-client-id" \
   --oauth-client-secret "my-secret" \
-  search --query "test"
+  list-pets
 
 # With specific scopes
-mcp2cli --mcp https://mcp.example.com/sse --oauth --oauth-scope "read write" --list
+mcp2cli --graphql https://api.example.com/graphql --oauth --oauth-scope "read write" users
+
+# Local spec file — use --base-url for OAuth discovery
+mcp2cli --spec ./openapi.json --base-url https://api.example.com --oauth --list
 ```
 
 Tokens are persisted in `~/.cache/mcp2cli/oauth/` so subsequent calls reuse existing tokens

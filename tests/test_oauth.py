@@ -160,7 +160,24 @@ class TestOAuthCLIValidation:
     def test_oauth_with_stdio_errors(self):
         r = self._run("--mcp-stdio", "echo test", "--oauth", "--list")
         assert r.returncode != 0
-        assert "only supported with --mcp" in r.stderr
+        assert "not supported with --mcp-stdio" in r.stderr
+
+    def test_oauth_with_spec_accepted(self):
+        """--oauth with --spec should not error on the flag itself (may fail on connection)."""
+        r = self._run("--spec", "https://example.com/openapi.json", "--oauth", "--list")
+        # Should NOT contain the old MCP-only error
+        assert "not supported" not in r.stderr
+
+    def test_oauth_with_graphql_accepted(self):
+        """--oauth with --graphql should not error on the flag itself (may fail on connection)."""
+        r = self._run("--graphql", "https://example.com/graphql", "--oauth", "--list")
+        assert "not supported" not in r.stderr
+
+    def test_oauth_with_local_spec_needs_base_url(self):
+        """--oauth with a local spec file requires --base-url for OAuth discovery."""
+        r = self._run("--spec", "./local.json", "--oauth", "--list")
+        assert r.returncode != 0
+        assert "--base-url" in r.stderr
 
     def test_oauth_flags_in_help(self):
         r = self._run("--help")
