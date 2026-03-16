@@ -71,8 +71,8 @@ class CommandDef:
     tool_name: str | None = None
     # GraphQL
     graphql_operation_type: str | None = None  # "query" or "mutation"
-    graphql_field_name: str | None = None      # original field name pre-kebab
-    graphql_return_type: dict | None = None    # return type info for selection set
+    graphql_field_name: str | None = None  # original field name pre-kebab
+    graphql_return_type: dict | None = None  # return type info for selection set
 
 
 @dataclass
@@ -258,8 +258,7 @@ def _run_jq(json_str: str, expr: str) -> str:
     """Pipe JSON through jq with the given expression. Exits on failure."""
     if not shutil.which("jq"):
         print(
-            "Error: --jq requires jq to be installed. "
-            "See https://jqlang.github.io/jq/",
+            "Error: --jq requires jq to be installed. See https://jqlang.github.io/jq/",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -330,7 +329,9 @@ def output_result(
         print(json.dumps(data))
 
 
-def _build_http_headers(auth_headers: list[tuple[str, str]], multipart: bool = False) -> dict[str, str]:
+def _build_http_headers(
+    auth_headers: list[tuple[str, str]], multipart: bool = False
+) -> dict[str, str]:
     """Build HTTP headers dict from auth_headers with a Content-Type default."""
     headers = dict(auth_headers)
     if not multipart:
@@ -732,13 +733,13 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
 
             # Request body — negotiate content type
             rb_content = details.get("requestBody", {}).get("content", {})
-            multipart_schema = rb_content.get("multipart/form-data", {}).get("schema", {})
+            multipart_schema = rb_content.get("multipart/form-data", {}).get(
+                "schema", {}
+            )
             json_schema = rb_content.get("application/json", {}).get("schema", {})
 
             mp_props = multipart_schema.get("properties", {})
-            has_binary = any(
-                p.get("format") == "binary" for p in mp_props.values()
-            )
+            has_binary = any(p.get("format") == "binary" for p in mp_props.values())
 
             if has_binary:
                 rb_schema = multipart_schema
@@ -1082,8 +1083,11 @@ def _build_graphql_param(arg: dict, types_by_name: dict) -> ParamDef:
         inner_named, _, _ = _unwrap_type(named_t)
         item_type_name = inner_named.get("name", "String")
         item_map = {
-            "Int": "integer", "Float": "number", "String": "string",
-            "ID": "string", "Boolean": "boolean",
+            "Int": "integer",
+            "Float": "number",
+            "String": "string",
+            "ID": "string",
+            "Boolean": "boolean",
         }
         param_schema["items"] = {"type": item_map.get(item_type_name, "string")}
     elif named_t.get("kind") == "INPUT_OBJECT":
@@ -1119,8 +1123,16 @@ def extract_graphql_commands(schema: dict) -> list[CommandDef]:
     commands: list[CommandDef] = []
     seen_names: set[str] = set()
 
-    query_fields = types_by_name.get(query_type_name, {}).get("fields", []) if query_type_name else []
-    mutation_fields = types_by_name.get(mutation_type_name, {}).get("fields", []) if mutation_type_name else []
+    query_fields = (
+        types_by_name.get(query_type_name, {}).get("fields", [])
+        if query_type_name
+        else []
+    )
+    mutation_fields = (
+        types_by_name.get(mutation_type_name, {}).get("fields", [])
+        if mutation_type_name
+        else []
+    )
     collisions = _detect_field_collisions(query_fields, mutation_fields)
 
     for op_type, type_name, fields in [
@@ -1267,13 +1279,17 @@ def execute_graphql(
             print(f"GraphQL error: {msgs}", file=sys.stderr)
             sys.exit(1)
         # Partial errors — include them in output
-        output_result(result, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
+        output_result(
+            result, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head
+        )
         return
 
     data = result.get("data", {})
     # Extract the specific field's data
     field_data = data.get(field_name, data)
-    output_result(field_data, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
+    output_result(
+        field_data, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head
+    )
 
 
 def handle_graphql(
@@ -1293,7 +1309,9 @@ def handle_graphql(
     head: int | None = None,
 ):
     """Top-level handler for --graphql mode."""
-    schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider)
+    schema = load_graphql_schema(
+        url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider
+    )
     commands = extract_graphql_commands(schema)
 
     if list_mode:
@@ -1316,9 +1334,18 @@ def handle_graphql(
 
     cmd: CommandDef = args._cmd
     execute_graphql(
-        args, cmd, url, schema, auth_headers, pretty, raw, toon=toon,
-        fields_override=fields_override, oauth_provider=oauth_provider,
-        jq_expr=jq_expr, head=head,
+        args,
+        cmd,
+        url,
+        schema,
+        auth_headers,
+        pretty,
+        raw,
+        toon=toon,
+        fields_override=fields_override,
+        oauth_provider=oauth_provider,
+        jq_expr=jq_expr,
+        head=head,
     )
 
 
@@ -1344,12 +1371,12 @@ def filter_commands(
         result = [c for c in result if c.method is None or c.method.upper() in upper]
     if include:
         result = [
-            c for c in result
-            if any(fnmatch.fnmatch(c.name, pat) for pat in include)
+            c for c in result if any(fnmatch.fnmatch(c.name, pat) for pat in include)
         ]
     if exclude:
         result = [
-            c for c in result
+            c
+            for c in result
             if not any(fnmatch.fnmatch(c.name, pat) for pat in exclude)
         ]
     return result
@@ -1479,10 +1506,15 @@ def _bake_create(argv: list[str]) -> None:
     modes = [args.spec, args.mcp, args.mcp_stdio]
     active = sum(1 for m in modes if m is not None)
     if active == 0:
-        print("Error: one of --spec, --mcp, or --mcp-stdio is required.", file=sys.stderr)
+        print(
+            "Error: one of --spec, --mcp, or --mcp-stdio is required.", file=sys.stderr
+        )
         sys.exit(1)
     if active > 1:
-        print("Error: --spec, --mcp, and --mcp-stdio are mutually exclusive.", file=sys.stderr)
+        print(
+            "Error: --spec, --mcp, and --mcp-stdio are mutually exclusive.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     all_configs = _load_baked_all()
@@ -1500,7 +1532,9 @@ def _bake_create(argv: list[str]) -> None:
     else:
         source_type, source = "mcp_stdio", args.mcp_stdio
 
-    auth_headers = [list(t) for t in _parse_kv_list(args.auth_header, ":", "auth header")]
+    auth_headers = [
+        list(t) for t in _parse_kv_list(args.auth_header, ":", "auth header")
+    ]
     env_vars = dict(_parse_kv_list(args.env, "=", "env"))
 
     config = {
@@ -1604,7 +1638,9 @@ def _bake_update(argv: list[str]) -> None:
     if args.exclude is not None:
         cfg["exclude"] = [x.strip() for x in args.exclude.split(",") if x.strip()]
     if args.methods is not None:
-        cfg["methods"] = [x.strip().upper() for x in args.methods.split(",") if x.strip()]
+        cfg["methods"] = [
+            x.strip().upper() for x in args.methods.split(",") if x.strip()
+        ]
     if args.description is not None:
         cfg["description"] = args.description
     if args.base_url is not None:
@@ -1618,7 +1654,11 @@ def _bake_update(argv: list[str]) -> None:
 def _bake_install(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="mcp2cli bake install")
     p.add_argument("name")
-    p.add_argument("--dir", default=None, help="Directory to install wrapper into (default: ~/.local/bin)")
+    p.add_argument(
+        "--dir",
+        default=None,
+        help="Directory to install wrapper into (default: ~/.local/bin)",
+    )
     args = p.parse_args(argv)
     cfg = _load_baked(args.name)
     if cfg is None:
@@ -1630,7 +1670,7 @@ def _bake_install(argv: list[str]) -> None:
     # Resolve mcp2cli path
     mcp2cli_bin = shutil.which("mcp2cli") or "mcp2cli"
     wrapper.write_text(
-        f"#!/bin/sh\nexec {shlex.quote(mcp2cli_bin)} @{args.name} \"$@\"\n"
+        f'#!/bin/sh\nexec {shlex.quote(mcp2cli_bin)} @{args.name} "$@"\n'
     )
     wrapper.chmod(0o755)
     print(f"Installed wrapper: {wrapper}")
@@ -1808,7 +1848,9 @@ def _collect_openapi_params(
                         if not fp.is_file():
                             print(f"Error: file not found: {val}", file=sys.stderr)
                             sys.exit(1)
-                        mime = mimetypes.guess_type(val)[0] or "application/octet-stream"
+                        mime = (
+                            mimetypes.guess_type(val)[0] or "application/octet-stream"
+                        )
                         if files is None:
                             files = {}
                         files[p.original_name] = (fp.name, open(fp, "rb"), mime)
@@ -2079,16 +2121,29 @@ async def _mcp_session(
     # Handle resource operations
     if resource_action:
         await _handle_resources(
-            session, resource_action, resource_uri, pretty, raw, toon,
-            jq_expr=jq_expr, head=head,
+            session,
+            resource_action,
+            resource_uri,
+            pretty,
+            raw,
+            toon,
+            jq_expr=jq_expr,
+            head=head,
         )
         return
 
     # Handle prompt operations
     if prompt_action:
         await _handle_prompts(
-            session, prompt_action, prompt_name, prompt_arguments, pretty, raw, toon,
-            jq_expr=jq_expr, head=head,
+            session,
+            prompt_action,
+            prompt_name,
+            prompt_arguments,
+            pretty,
+            raw,
+            toon,
+            jq_expr=jq_expr,
+            head=head,
         )
         return
 
@@ -2133,8 +2188,14 @@ async def _mcp_session(
 
 
 async def _handle_resources(
-    session, action: str, uri: str | None, pretty: bool, raw: bool, toon: bool,
-    jq_expr: str | None = None, head: int | None = None,
+    session,
+    action: str,
+    uri: str | None,
+    pretty: bool,
+    raw: bool,
+    toon: bool,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     _out = dict(pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
     if action == "list":
@@ -2377,7 +2438,11 @@ def _extract_content_parts(content_list, *, attrs=("text", "data")) -> str:
 async def _dispatch_list_tools(session, params):
     result = await session.list_tools()
     return [
-        {"name": t.name, "description": t.description or "", "inputSchema": t.inputSchema or {}}
+        {
+            "name": t.name,
+            "description": t.description or "",
+            "inputSchema": t.inputSchema or {},
+        }
         for t in result.tools
     ]
 
@@ -2390,7 +2455,12 @@ async def _dispatch_call_tool(session, params):
 async def _dispatch_list_resources(session, params):
     result = await session.list_resources()
     return [
-        {"name": r.name, "uri": str(r.uri), "description": r.description or "", "mimeType": r.mimeType or ""}
+        {
+            "name": r.name,
+            "uri": str(r.uri),
+            "description": r.description or "",
+            "mimeType": r.mimeType or "",
+        }
         for r in result.resources
     ]
 
@@ -2405,7 +2475,12 @@ async def _dispatch_read_resource(session, params):
 async def _dispatch_list_resource_templates(session, params):
     result = await session.list_resource_templates()
     return [
-        {"name": t.name, "uriTemplate": str(t.uriTemplate), "description": t.description or "", "mimeType": t.mimeType or ""}
+        {
+            "name": t.name,
+            "uriTemplate": str(t.uriTemplate),
+            "description": t.description or "",
+            "mimeType": t.mimeType or "",
+        }
         for t in result.resourceTemplates
     ]
 
@@ -2417,7 +2492,11 @@ async def _dispatch_list_prompts(session, params):
             "name": p.name,
             "description": p.description or "",
             "arguments": [
-                {"name": a.name, "description": a.description or "", "required": a.required or False}
+                {
+                    "name": a.name,
+                    "description": a.description or "",
+                    "required": a.required or False,
+                }
                 for a in (p.arguments or [])
             ],
         }
@@ -2433,7 +2512,9 @@ async def _dispatch_get_prompt(session, params):
         if hasattr(content, "text"):
             messages.append({"role": msg.role, "content": content.text})
         else:
-            messages.append({"role": msg.role, "content": json.dumps(content.model_dump())})
+            messages.append(
+                {"role": msg.role, "content": json.dumps(content.model_dump())}
+            )
     return {"description": result.description or "", "messages": messages}
 
 
@@ -2665,8 +2746,12 @@ def _fetch_or_cache_mcp_tools(
         if cached is not None:
             return cached
     tools = _fetch_mcp_tools(
-        source, is_stdio, auth_headers, env_vars,
-        transport=transport, oauth_provider=oauth_provider,
+        source,
+        is_stdio,
+        auth_headers,
+        env_vars,
+        transport=transport,
+        oauth_provider=oauth_provider,
     )
     save_cache(f"{key}_tools", tools)
     return tools
@@ -2694,14 +2779,35 @@ def _dispatch_mcp_call(
     """Route to run_mcp_stdio or run_mcp_http based on is_stdio."""
     if is_stdio:
         run_mcp_stdio(
-            source, env_vars, tool_name, arguments, list_mode,
-            pretty, raw, cache_key, ttl, refresh, toon=toon, **extra,
+            source,
+            env_vars,
+            tool_name,
+            arguments,
+            list_mode,
+            pretty,
+            raw,
+            cache_key,
+            ttl,
+            refresh,
+            toon=toon,
+            **extra,
         )
     else:
         run_mcp_http(
-            source, auth_headers, tool_name, arguments, list_mode,
-            pretty, raw, cache_key, ttl, refresh, toon=toon,
-            transport=transport, oauth_provider=oauth_provider, **extra,
+            source,
+            auth_headers,
+            tool_name,
+            arguments,
+            list_mode,
+            pretty,
+            raw,
+            cache_key,
+            ttl,
+            refresh,
+            toon=toon,
+            transport=transport,
+            oauth_provider=oauth_provider,
+            **extra,
         )
 
 
@@ -2744,46 +2850,93 @@ def handle_mcp(
             head=head,
         )
         _dispatch_mcp_call(
-            source, is_stdio, auth_headers, env_vars,
-            None, None, False, pretty, raw, key, ttl, refresh,
-            toon=toon, transport=transport, oauth_provider=oauth_provider,
+            source,
+            is_stdio,
+            auth_headers,
+            env_vars,
+            None,
+            None,
+            False,
+            pretty,
+            raw,
+            key,
+            ttl,
+            refresh,
+            toon=toon,
+            transport=transport,
+            oauth_provider=oauth_provider,
             **extra,
         )
         return
 
     if list_mode:
-        if bake_config and (bake_config.include or bake_config.exclude or bake_config.methods):
+        if bake_config and (
+            bake_config.include or bake_config.exclude or bake_config.methods
+        ):
             # Fetch tools, filter, then list — don't delegate to unfiltered path
             tools = _fetch_or_cache_mcp_tools(
-                key, ttl, refresh, source, is_stdio, auth_headers, env_vars,
-                transport=transport, oauth_provider=oauth_provider,
+                key,
+                ttl,
+                refresh,
+                source,
+                is_stdio,
+                auth_headers,
+                env_vars,
+                transport=transport,
+                oauth_provider=oauth_provider,
             )
             commands = extract_mcp_commands(tools)
             commands = filter_commands(
-                commands, bake_config.include, bake_config.exclude, bake_config.methods,
+                commands,
+                bake_config.include,
+                bake_config.exclude,
+                bake_config.methods,
             )
             print("\nAvailable tools:")
             list_mcp_commands(commands)
             return
         _dispatch_mcp_call(
-            source, is_stdio, auth_headers, env_vars,
-            None, None, True, pretty, raw, key, ttl, refresh,
-            toon=toon, transport=transport, oauth_provider=oauth_provider,
+            source,
+            is_stdio,
+            auth_headers,
+            env_vars,
+            None,
+            None,
+            True,
+            pretty,
+            raw,
+            key,
+            ttl,
+            refresh,
+            toon=toon,
+            transport=transport,
+            oauth_provider=oauth_provider,
             search_pattern=search_pattern,
-            jq_expr=jq_expr, head=head,
+            jq_expr=jq_expr,
+            head=head,
         )
         return
 
     # We need tool list to build argparse, try cache first
     tools = _fetch_or_cache_mcp_tools(
-        key, ttl, refresh, source, is_stdio, auth_headers, env_vars,
-        transport=transport, oauth_provider=oauth_provider,
+        key,
+        ttl,
+        refresh,
+        source,
+        is_stdio,
+        auth_headers,
+        env_vars,
+        transport=transport,
+        oauth_provider=oauth_provider,
     )
 
     commands = extract_mcp_commands(tools)
     if bake_config:
         commands = filter_commands(
-            commands, bake_config.include, bake_config.exclude, bake_config.methods,
+            commands,
+            bake_config.include,
+            bake_config.exclude,
+            bake_config.methods,
         )
 
     if not remaining:
@@ -2812,10 +2965,23 @@ def handle_mcp(
                 arguments[p.original_name] = coerce_value(val, p.schema)
 
     _dispatch_mcp_call(
-        source, is_stdio, auth_headers, env_vars,
-        cmd.tool_name, arguments, False, pretty, raw, key, ttl, refresh,
-        toon=toon, transport=transport, oauth_provider=oauth_provider,
-        jq_expr=jq_expr, head=head,
+        source,
+        is_stdio,
+        auth_headers,
+        env_vars,
+        cmd.tool_name,
+        arguments,
+        False,
+        pretty,
+        raw,
+        key,
+        ttl,
+        refresh,
+        toon=toon,
+        transport=transport,
+        oauth_provider=oauth_provider,
+        jq_expr=jq_expr,
+        head=head,
     )
 
 
@@ -3053,7 +3219,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="URI",
         help="Full redirect URI for the OAuth callback (e.g. http://localhost:3334/oauth/callback). "
-             "Overrides the default http://127.0.0.1:<random-port>/callback.",
+        "Overrides the default http://127.0.0.1:<random-port>/callback.",
     )
     # Resource flags
     pre.add_argument(
@@ -3143,9 +3309,7 @@ def _setup_oauth(pre_args):
         )
         sys.exit(1)
     if pre_args.mcp_stdio:
-        print(
-            "Error: OAuth is not supported with --mcp-stdio", file=sys.stderr
-        )
+        print("Error: OAuth is not supported with --mcp-stdio", file=sys.stderr)
         sys.exit(1)
     # Determine OAuth server URL for discovery
     server_url = pre_args.mcp or pre_args.graphql
@@ -3211,6 +3375,15 @@ def _handle_session_operations(
                 "Error: --session-start requires --mcp or --mcp-stdio", file=sys.stderr
             )
             sys.exit(1)
+        use_oauth = (
+            pre_args.oauth or pre_args.oauth_client_id or pre_args.oauth_client_secret
+        )
+        if pre_args.mcp and use_oauth:
+            print(
+                "Error: OAuth is not yet supported with --session-start over HTTP transports",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         source = pre_args.mcp or pre_args.mcp_stdio
         is_stdio = pre_args.mcp_stdio is not None
         session_start(
@@ -3232,15 +3405,23 @@ def _handle_session_operations(
     if pre_args.list_resources:
         result = _session_request(sess_name, "list_resources")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-            jq_expr=pre_args.jq, head=pre_args.head,
+            result,
+            pretty=pre_args.pretty,
+            raw=pre_args.raw,
+            toon=pre_args.toon,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return True
     if pre_args.list_resource_templates:
         result = _session_request(sess_name, "list_resource_templates")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-            jq_expr=pre_args.jq, head=pre_args.head,
+            result,
+            pretty=pre_args.pretty,
+            raw=pre_args.raw,
+            toon=pre_args.toon,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return True
     if pre_args.read_resource:
@@ -3248,15 +3429,23 @@ def _handle_session_operations(
             sess_name, "read_resource", {"uri": pre_args.read_resource}
         )
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-            jq_expr=pre_args.jq, head=pre_args.head,
+            result,
+            pretty=pre_args.pretty,
+            raw=pre_args.raw,
+            toon=pre_args.toon,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return True
     if pre_args.list_prompts:
         result = _session_request(sess_name, "list_prompts")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-            jq_expr=pre_args.jq, head=pre_args.head,
+            result,
+            pretty=pre_args.pretty,
+            raw=pre_args.raw,
+            toon=pre_args.toon,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return True
     if pre_args.get_prompt:
@@ -3271,8 +3460,12 @@ def _handle_session_operations(
             {"name": pre_args.get_prompt, "arguments": p_args},
         )
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-            jq_expr=pre_args.jq, head=pre_args.head,
+            result,
+            pretty=pre_args.pretty,
+            raw=pre_args.raw,
+            toon=pre_args.toon,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return True
     if pre_args.list_commands:
@@ -3321,9 +3514,7 @@ def _handle_session_operations(
     result = _session_request(
         sess_name, "call_tool", {"name": cmd.tool_name, "arguments": arguments}
     )
-    output_result(
-        result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
-    )
+    output_result(result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon)
     return True
 
 
@@ -3381,7 +3572,10 @@ def _handle_openapi_mode(
     commands = extract_openapi_commands(spec)
     if bake_config:
         commands = filter_commands(
-            commands, bake_config.include, bake_config.exclude, bake_config.methods,
+            commands,
+            bake_config.include,
+            bake_config.exclude,
+            bake_config.methods,
         )
 
     if pre_args.list_commands:
@@ -3431,10 +3625,16 @@ def _handle_openapi_mode(
 
     cmd: CommandDef = args._cmd
     execute_openapi(
-        args, cmd, base_url, auth_headers,
-        pre_args.pretty, pre_args.raw, toon=pre_args.toon,
+        args,
+        cmd,
+        base_url,
+        auth_headers,
+        pre_args.pretty,
+        pre_args.raw,
+        toon=pre_args.toon,
         oauth_provider=oauth_provider,
-        jq_expr=pre_args.jq, head=pre_args.head,
+        jq_expr=pre_args.jq,
+        head=pre_args.head,
     )
 
 
@@ -3529,7 +3729,12 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
 
     # --- OpenAPI mode ---
     _handle_openapi_mode(
-        pre_args, pre, remaining, auth_headers, search_pattern, bake_config,
+        pre_args,
+        pre,
+        remaining,
+        auth_headers,
+        search_pattern,
+        bake_config,
         oauth_provider=oauth_provider,
     )
 
