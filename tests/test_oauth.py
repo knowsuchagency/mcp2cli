@@ -162,6 +162,17 @@ class TestOAuthCLIValidation:
         assert r.returncode != 0
         assert "not supported with --mcp-stdio" in r.stderr
 
+    def test_oauth_with_session_start_over_http_errors(self):
+        r = self._run(
+            "--mcp",
+            "https://example.com/mcp",
+            "--oauth",
+            "--session-start",
+            "test-session",
+        )
+        assert r.returncode != 0
+        assert "not yet supported with --session-start over HTTP transports" in r.stderr
+
     def test_oauth_with_spec_accepted(self):
         """--oauth with --spec should not error on the flag itself (may fail on connection)."""
         r = self._run("--spec", "https://example.com/openapi.json", "--oauth", "--list")

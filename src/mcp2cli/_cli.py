@@ -569,6 +569,17 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
     env_vars = dict(_parse_kv_list(pre_args.env, "=", "env"))
 
     _validate_source_modes(pre_args, pre, remaining)
+
+    use_oauth = (
+        pre_args.oauth or pre_args.oauth_client_id or pre_args.oauth_client_secret
+    )
+    if pre_args.session_start and pre_args.mcp and use_oauth:
+        print(
+            "Error: OAuth is not yet supported with --session-start over HTTP transports",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     oauth_provider = _setup_oauth(pre_args)
 
     if _handle_session_operations(
