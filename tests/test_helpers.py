@@ -7,7 +7,9 @@ import shutil
 from mcp2cli import (
     ParamDef,
     CommandDef,
+    _apply_head,
     _find_toon_cli,
+    _run_jq,
     _split_at_subcommand,
     _toon_encode,
     cache_key_for,
@@ -171,6 +173,90 @@ class TestOutputResult:
         captured = capsys.readouterr()
         assert '"a": 1' in captured.out  # fell back to JSON
         assert "TOON CLI" in captured.err  # printed warning
+
+    def test_jq_filters_dict(self, capsys, monkeypatch):
+        """--jq filters JSON output through jq."""
+        monkeypatch.setattr("mcp2cli._run_jq", lambda json_str, expr: '"Alice"\n')
+        output_result({"name": "Alice", "age": 30}, jq_expr=".name")
+        assert capsys.readouterr().out.strip() == '"Alice"'
+
+    def test_jq_filters_list(self, capsys, monkeypatch):
+        monkeypatch.setattr("mcp2cli._run_jq", lambda json_str, expr: "2\n")
+        output_result([{"a": 1}, {"a": 2}], jq_expr="length")
+        assert capsys.readouterr().out.strip() == "2"
+
+    def test_jq_skipped_for_raw(self, capsys, monkeypatch):
+        """--raw takes priority over --jq."""
+        called = []
+        monkeypatch.setattr("mcp2cli._run_jq", lambda *a: called.append(1) or "x")
+        output_result({"a": 1}, raw=True, jq_expr=".a")
+        assert not called
+
+    def test_jq_non_json_string_passthrough(self, capsys, monkeypatch):
+        """Non-JSON strings bypass jq processing."""
+        called = []
+        monkeypatch.setattr("mcp2cli._run_jq", lambda *a: called.append(1) or "x")
+        output_result("plain text", jq_expr=".a")
+        assert capsys.readouterr().out.strip() == "plain text"
+        assert not called
+
+    def test_head_truncates_list(self, capsys):
+        output_result([{"a": 1}, {"a": 2}, {"a": 3}], head=2, pretty=True)
+        out = json.loads(capsys.readouterr().out)
+        assert len(out) == 2
+
+    def test_head_dict_passthrough(self, capsys):
+        """--head on a dict passes through unchanged."""
+        output_result({"a": 1, "b": 2}, head=1, pretty=True)
+        out = json.loads(capsys.readouterr().out)
+        assert out == {"a": 1, "b": 2}
+
+    def test_head_before_jq(self, capsys, monkeypatch):
+        """--head truncates before --jq processes."""
+        def mock_jq(json_str, expr):
+            data = json.loads(json_str)
+            return f"{len(data)}\n"
+        monkeypatch.setattr("mcp2cli._run_jq", mock_jq)
+        output_result([1, 2, 3, 4, 5], head=2, jq_expr="length")
+        assert capsys.readouterr().out.strip() == "2"
+
+
+class TestRunJq:
+    def test_basic_filter(self):
+        if not shutil.which("jq"):
+            import pytest
+            pytest.skip("jq not available")
+        result = _run_jq('{"name": "Alice"}', ".name")
+        assert result.strip() == '"Alice"'
+
+    def test_jq_not_found(self, monkeypatch):
+        import pytest
+        monkeypatch.setattr(shutil, "which", lambda cmd: None)
+        with pytest.raises(SystemExit):
+            _run_jq("{}", ".")
+
+    def test_invalid_expression(self):
+        if not shutil.which("jq"):
+            import pytest
+            pytest.skip("jq not available")
+        import pytest
+        with pytest.raises(SystemExit):
+            _run_jq('{"a": 1}', ".invalid[")
+
+
+class TestApplyHead:
+    def test_list_truncation(self):
+        assert _apply_head([1, 2, 3, 4, 5], 3) == [1, 2, 3]
+
+    def test_dict_passthrough(self):
+        d = {"a": 1}
+        assert _apply_head(d, 2) is d
+
+    def test_empty_list(self):
+        assert _apply_head([], 5) == []
+
+    def test_head_larger_than_list(self):
+        assert _apply_head([1, 2], 10) == [1, 2]
 
 
 class TestToonEncode:
@@ -441,3 +527,23 @@ class TestSplitAtSubcommand:
         )
         assert g == ["--mcp", "http://s"]
         assert t == ["deploy", "--env", "production"]
+
+    def test_jq_value_not_treated_as_subcommand(self):
+        """--jq's expression value should not be mistaken for a subcommand."""
+        pre = self._pre()
+        pre.add_argument("--jq", default=None)
+        g, t = _split_at_subcommand(
+            ["--mcp", "http://s", "--jq", ".name", "my-tool"], pre
+        )
+        assert g == ["--mcp", "http://s", "--jq", ".name"]
+        assert t == ["my-tool"]
+
+    def test_head_value_not_treated_as_subcommand(self):
+        """--head's numeric value should not be mistaken for a subcommand."""
+        pre = self._pre()
+        pre.add_argument("--head", type=int, default=None)
+        g, t = _split_at_subcommand(
+            ["--mcp", "http://s", "--head", "5", "my-tool"], pre
+        )
+        assert g == ["--mcp", "http://s", "--head", "5"]
+        assert t == ["my-tool"]

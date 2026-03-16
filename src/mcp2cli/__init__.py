@@ -246,7 +246,48 @@ def _toon_encode(json_str: str) -> str | None:
     return None
 
 
-def output_result(data, *, pretty: bool = False, raw: bool = False, toon: bool = False):
+def _run_jq(json_str: str, expr: str) -> str:
+    """Pipe JSON through jq with the given expression. Exits on failure."""
+    if not shutil.which("jq"):
+        print(
+            "Error: --jq requires jq to be installed. "
+            "See https://jqlang.github.io/jq/",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        result = subprocess.run(
+            ["jq", expr],
+            input=json_str,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"jq error: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        return result.stdout
+    except subprocess.TimeoutExpired:
+        print("Error: jq timed out", file=sys.stderr)
+        sys.exit(1)
+
+
+def _apply_head(data, n: int):
+    """Truncate data to first N elements (array) or return as-is (dict/scalar)."""
+    if isinstance(data, list):
+        return data[:n]
+    return data
+
+
+def output_result(
+    data,
+    *,
+    pretty: bool = False,
+    raw: bool = False,
+    toon: bool = False,
+    jq_expr: str | None = None,
+    head: int | None = None,
+):
     if raw:
         if isinstance(data, str):
             print(data)
@@ -259,6 +300,11 @@ def output_result(data, *, pretty: bool = False, raw: bool = False, toon: bool =
         except (json.JSONDecodeError, TypeError):
             print(data)
             return
+    if head is not None:
+        data = _apply_head(data, head)
+    if jq_expr:
+        print(_run_jq(json.dumps(data), jq_expr), end="")
+        return
     if toon:
         encoded = _toon_encode(json.dumps(data))
         if encoded is not None:
@@ -1103,6 +1149,8 @@ def execute_graphql(
     toon: bool = False,
     fields_override: str | None = None,
     oauth_provider: "httpx.Auth | None" = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     """Build and execute a GraphQL query/mutation."""
     document, variables, field_name = _build_graphql_document(
@@ -1126,13 +1174,13 @@ def execute_graphql(
             print(f"GraphQL error: {msgs}", file=sys.stderr)
             sys.exit(1)
         # Partial errors — include them in output
-        output_result(result, pretty=pretty, raw=raw, toon=toon)
+        output_result(result, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
         return
 
     data = result.get("data", {})
     # Extract the specific field's data
     field_data = data.get(field_name, data)
-    output_result(field_data, pretty=pretty, raw=raw, toon=toon)
+    output_result(field_data, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
 
 
 def handle_graphql(
@@ -1148,6 +1196,8 @@ def handle_graphql(
     toon: bool = False,
     fields_override: str | None = None,
     oauth_provider: "httpx.Auth | None" = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     """Top-level handler for --graphql mode."""
     schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider)
@@ -1175,6 +1225,7 @@ def handle_graphql(
     execute_graphql(
         args, cmd, url, schema, auth_headers, pretty, raw, toon=toon,
         fields_override=fields_override, oauth_provider=oauth_provider,
+        jq_expr=jq_expr, head=head,
     )
 
 
@@ -1673,6 +1724,8 @@ def execute_openapi(
     raw: bool,
     toon: bool = False,
     oauth_provider: "httpx.Auth | None" = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     path, query_params, extra_headers, body = _collect_openapi_params(cmd, args)
     url = base_url.rstrip("/") + path
@@ -1700,7 +1753,7 @@ def execute_openapi(
         print(resp.text)
         return
 
-    output_result(data, pretty=pretty, toon=toon)
+    output_result(data, pretty=pretty, toon=toon, jq_expr=jq_expr, head=head)
 
 
 # ---------------------------------------------------------------------------
@@ -1728,6 +1781,8 @@ def run_mcp_http(
     prompt_name: str | None = None,
     prompt_arguments: dict | None = None,
     search_pattern: str | None = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -1736,6 +1791,8 @@ def run_mcp_http(
         prompt_name=prompt_name,
         prompt_arguments=prompt_arguments,
         search_pattern=search_pattern,
+        jq_expr=jq_expr,
+        head=head,
     )
 
     async def _run():
@@ -1819,6 +1876,8 @@ def run_mcp_stdio(
     prompt_name: str | None = None,
     prompt_arguments: dict | None = None,
     search_pattern: str | None = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -1827,6 +1886,8 @@ def run_mcp_stdio(
         prompt_name=prompt_name,
         prompt_arguments=prompt_arguments,
         search_pattern=search_pattern,
+        jq_expr=jq_expr,
+        head=head,
     )
 
     import anyio
@@ -1876,18 +1937,22 @@ async def _mcp_session(
     prompt_name: str | None = None,
     prompt_arguments: dict | None = None,
     search_pattern: str | None = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     # Handle resource operations
     if resource_action:
         await _handle_resources(
-            session, resource_action, resource_uri, pretty, raw, toon
+            session, resource_action, resource_uri, pretty, raw, toon,
+            jq_expr=jq_expr, head=head,
         )
         return
 
     # Handle prompt operations
     if prompt_action:
         await _handle_prompts(
-            session, prompt_action, prompt_name, prompt_arguments, pretty, raw, toon
+            session, prompt_action, prompt_name, prompt_arguments, pretty, raw, toon,
+            jq_expr=jq_expr, head=head,
         )
         return
 
@@ -1923,7 +1988,7 @@ async def _mcp_session(
     result = await session.call_tool(tool_name, arguments or {})
 
     text = _extract_content_parts(result.content)
-    output_result(text, pretty=pretty, raw=raw, toon=toon)
+    output_result(text, pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
 
 
 # ---------------------------------------------------------------------------
@@ -1932,8 +1997,10 @@ async def _mcp_session(
 
 
 async def _handle_resources(
-    session, action: str, uri: str | None, pretty: bool, raw: bool, toon: bool
+    session, action: str, uri: str | None, pretty: bool, raw: bool, toon: bool,
+    jq_expr: str | None = None, head: int | None = None,
 ):
+    _out = dict(pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
     if action == "list":
         result = await session.list_resources()
         data = [
@@ -1945,7 +2012,7 @@ async def _handle_resources(
             }
             for r in result.resources
         ]
-        output_result(data, pretty=pretty, raw=raw, toon=toon)
+        output_result(data, **_out)
     elif action == "templates":
         result = await session.list_resource_templates()
         data = [
@@ -1957,7 +2024,7 @@ async def _handle_resources(
             }
             for t in result.resourceTemplates
         ]
-        output_result(data, pretty=pretty, raw=raw, toon=toon)
+        output_result(data, **_out)
     elif action == "read":
         from pydantic import AnyUrl
 
@@ -1969,7 +2036,7 @@ async def _handle_resources(
             elif hasattr(content, "blob"):
                 parts.append(content.blob)
         text = "\n".join(parts) if parts else ""
-        output_result(text, pretty=pretty, raw=raw, toon=toon)
+        output_result(text, **_out)
 
 
 # ---------------------------------------------------------------------------
@@ -1985,7 +2052,10 @@ async def _handle_prompts(
     pretty: bool,
     raw: bool,
     toon: bool,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
+    _out = dict(pretty=pretty, raw=raw, toon=toon, jq_expr=jq_expr, head=head)
     if action == "list":
         result = await session.list_prompts()
         data = [
@@ -2003,7 +2073,7 @@ async def _handle_prompts(
             }
             for p in result.prompts
         ]
-        output_result(data, pretty=pretty, raw=raw, toon=toon)
+        output_result(data, **_out)
     elif action == "get":
         result = await session.get_prompt(name, arguments or {})
         messages = []
@@ -2016,7 +2086,7 @@ async def _handle_prompts(
                     {"role": msg.role, "content": json.dumps(content.model_dump())}
                 )
         data = {"description": result.description or "", "messages": messages}
-        output_result(data, pretty=pretty, raw=raw, toon=toon)
+        output_result(data, **_out)
 
 
 # ---------------------------------------------------------------------------
@@ -2521,6 +2591,8 @@ def handle_mcp(
     prompt_arguments: dict | None = None,
     search_pattern: str | None = None,
     bake_config: BakeConfig | None = None,
+    jq_expr: str | None = None,
+    head: int | None = None,
 ):
     key = cache_key_override or cache_key_for(source)
 
@@ -2532,6 +2604,8 @@ def handle_mcp(
             prompt_action=prompt_action,
             prompt_name=prompt_name,
             prompt_arguments=prompt_arguments,
+            jq_expr=jq_expr,
+            head=head,
         )
         _dispatch_mcp_call(
             source, is_stdio, auth_headers, env_vars,
@@ -2560,6 +2634,7 @@ def handle_mcp(
             None, None, True, pretty, raw, key, ttl, refresh,
             toon=toon, transport=transport, oauth_provider=oauth_provider,
             search_pattern=search_pattern,
+            jq_expr=jq_expr, head=head,
         )
         return
 
@@ -2604,6 +2679,7 @@ def handle_mcp(
         source, is_stdio, auth_headers, env_vars,
         cmd.tool_name, arguments, False, pretty, raw, key, ttl, refresh,
         toon=toon, transport=transport, oauth_provider=oauth_provider,
+        jq_expr=jq_expr, head=head,
     )
 
 
@@ -2785,6 +2861,19 @@ def _build_main_parser() -> argparse.ArgumentParser:
             "list-users) and 15-20%% for semi-uniform data. Best for LLM consumption "
             "of large result sets. Requires @toon-format/cli (npm install -g @toon-format/cli)."
         ),
+    )
+    pre.add_argument(
+        "--jq",
+        default=None,
+        metavar="EXPR",
+        help="Filter JSON output through jq (e.g. '.[] | .name'). Requires jq installed.",
+    )
+    pre.add_argument(
+        "--head",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Limit output to first N records (arrays) or N lines (text)",
     )
     pre.add_argument(
         "--fields",
@@ -3005,13 +3094,15 @@ def _handle_session_operations(
     if pre_args.list_resources:
         result = _session_request(sess_name, "list_resources")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
+            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+            jq_expr=pre_args.jq, head=pre_args.head,
         )
         return True
     if pre_args.list_resource_templates:
         result = _session_request(sess_name, "list_resource_templates")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
+            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+            jq_expr=pre_args.jq, head=pre_args.head,
         )
         return True
     if pre_args.read_resource:
@@ -3019,13 +3110,15 @@ def _handle_session_operations(
             sess_name, "read_resource", {"uri": pre_args.read_resource}
         )
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
+            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+            jq_expr=pre_args.jq, head=pre_args.head,
         )
         return True
     if pre_args.list_prompts:
         result = _session_request(sess_name, "list_prompts")
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
+            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+            jq_expr=pre_args.jq, head=pre_args.head,
         )
         return True
     if pre_args.get_prompt:
@@ -3040,7 +3133,8 @@ def _handle_session_operations(
             {"name": pre_args.get_prompt, "arguments": p_args},
         )
         output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
+            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+            jq_expr=pre_args.jq, head=pre_args.head,
         )
         return True
     if pre_args.list_commands:
@@ -3202,6 +3296,7 @@ def _handle_openapi_mode(
         args, cmd, base_url, auth_headers,
         pre_args.pretty, pre_args.raw, toon=pre_args.toon,
         oauth_provider=oauth_provider,
+        jq_expr=pre_args.jq, head=pre_args.head,
     )
 
 
@@ -3214,6 +3309,11 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
     global_argv, tool_argv = _split_at_subcommand(argv, pre)
     pre_args, leftover = pre.parse_known_args(global_argv)
     remaining = leftover + tool_argv
+
+    # Validate mutually exclusive output flags
+    if pre_args.jq and pre_args.toon:
+        print("Error: --jq and --toon are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
 
     # --search implies --list
     search_pattern = pre_args.search_pattern
@@ -3253,6 +3353,8 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             toon=pre_args.toon,
             fields_override=pre_args.fields,
             oauth_provider=oauth_provider,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return
 
@@ -3282,6 +3384,8 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             prompt_arguments=prompt_arguments,
             search_pattern=search_pattern,
             bake_config=bake_config,
+            jq_expr=pre_args.jq,
+            head=pre_args.head,
         )
         return
 
