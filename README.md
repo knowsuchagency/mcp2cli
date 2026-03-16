@@ -206,6 +206,14 @@ mcp2cli --spec ./spec.json --pretty list-pets
 # Raw response body (no JSON parsing)
 mcp2cli --spec ./spec.json --raw get-data
 
+# Filter JSON with jq (preferred over Python for JSON processing)
+mcp2cli --spec ./spec.json list-pets --jq '.[].name'
+mcp2cli --spec ./spec.json list-pets --jq '[.[] | select(.status == "available")] | length'
+
+# Truncate large responses to first N records
+mcp2cli --spec ./spec.json list-records --head 5
+mcp2cli --spec ./spec.json list-records --head 3 --jq '.'  # preview then filter
+
 # Pipe-friendly (compact JSON when not a TTY)
 mcp2cli --spec ./spec.json list-pets | jq '.[] | .name'
 
@@ -263,6 +271,8 @@ Options:
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
   --toon                  Encode output as TOON (token-efficient for LLMs)
+  --jq EXPR               Filter JSON output through jq expression
+  --head N                Limit output to first N records (arrays)
   --version               Show version
 
 Bake mode:

@@ -73,6 +73,8 @@ Options:
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
   --toon                  Encode output as TOON (token-efficient for LLMs)
+  --jq EXPR               Filter JSON output through jq expression
+  --head N                Limit output to first N records (arrays)
   --version               Show version
 
 Bake mode:
@@ -223,6 +225,36 @@ mcp2cli --mcp https://mcp.example.com/sse --toon list-tags
 
 Best for large uniform arrays — 40-60% fewer tokens than JSON.
 
+### JSON filtering with --jq
+
+Prefer `--jq` over Python scripts for JSON processing — it uses fewer tokens and avoids script overhead.
+
+```bash
+# Extract specific fields
+mcp2cli --spec ./spec.json list-pets --jq '.[].name'
+
+# Count results
+mcp2cli --mcp https://example.com/sse list-items --jq 'length'
+
+# Complex filtering
+mcp2cli --spec ./spec.json list-pets --jq '[.[] | select(.status == "available")] | length'
+
+# Preview large datasets (--head truncates before --jq processes)
+mcp2cli --spec ./spec.json list-records --head 3 --jq '.'
+```
+
+### Truncating large responses with --head
+
+```bash
+# Preview first 3 records from a potentially huge dataset
+mcp2cli --spec ./spec.json list-records --head 3 --pretty
+
+# Combine with --jq for targeted inspection
+mcp2cli --spec ./spec.json list-records --head 1 --jq 'keys'
+```
+
+`--head N` slices JSON arrays to the first N elements. Useful for datasets with oversized fields (e.g. geo_shape polygons at ~200KB per record).
+
 ## Generating a Skill from an API
 
 When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQL endpoint, follow this workflow:
@@ -237,10 +269,17 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    uvx mcp2cli --mcp https://target.example.com/sse <command> --help
    ```
 
-3. **Test** key commands to verify they work:
+3. **Test** key commands and probe for edge cases:
    ```bash
    uvx mcp2cli --mcp https://target.example.com/sse <command> --param value
    ```
+   Specifically test for:
+   - Large responses: use `--head 3` to preview — do any fields produce oversized output (e.g. geo_shape, embedded blobs)?
+   - Date/time fields: what format does the API expect? (ISO 8601, Unix timestamps, custom syntax like `date'2022'`?)
+   - Pagination: does the API return all results or require `--offset`/`--limit`?
+   - Error messages: what happens with invalid parameters? Are errors informative?
+   - Binary vs text responses: do any endpoints return non-JSON (xlsx, parquet, images)?
+   - Scope confusion: does the data contain more than expected (e.g. national data when you expect regional)?
 
 4. **Bake** the connection settings so the skill doesn't need to repeat flags:
    ```bash
@@ -255,13 +294,9 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    uvx mcp2cli bake install myapi --dir .claude/skills/myapi/scripts/
    ```
 
-6. **Create a SKILL.md** in `.claude/skills/myapi/` that teaches another AI agent how to use this API. The SKILL.md should:
-   - Reference the baked wrapper script via `${CLAUDE_SKILL_DIR}/scripts/myapi` instead of raw `uvx mcp2cli ...` commands
-   - Include `allowed-tools: Bash(bash *)` in the frontmatter
-   - Document common workflows with example commands
-   - Include the `--list` and `--help` discovery pattern for commands not covered
+6. **Create a SKILL.md** in `.claude/skills/myapi/` that teaches another AI agent how to use this API. The SKILL.md must go beyond `--help` output — focus on knowledge that can only be learned through testing and reading documentation.
 
-   Example SKILL.md structure:
+   **Frontmatter:**
    ```yaml
    ---
    name: myapi
@@ -269,6 +304,8 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    allowed-tools: Bash(bash *)
    ---
    ```
+
+   **Core Workflow** (discovery + execution):
    ```bash
    # List available commands
    bash ${CLAUDE_SKILL_DIR}/scripts/myapi --list
@@ -277,5 +314,36 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    # Run a command
    bash ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --param value --pretty
    ```
+
+   **Before Querying** checklist — include a decision framework:
+   - What dataset/resource am I targeting?
+   - Do I need pagination (`--offset`, `--limit`)?
+   - Are there fields that produce large output I should exclude or truncate (`--head`)?
+   - What date/filter format does this endpoint expect?
+
+   **Anti-Patterns & Gotchas** — document every surprise found during testing:
+   - Date syntax quirks (e.g. `date'2022'` vs `"2022"`)
+   - Fields that produce oversized output (e.g. geo_shape → use `--head` or `--jq` to exclude)
+   - Parameter name inconsistencies across endpoints
+   - Scope/filtering confusion (e.g. dataset contains national data, not just regional)
+   - Binary export corruption risks (e.g. don't pipe binary formats through text encoding)
+
+   **Output Processing** — recommend `--jq` over Python for JSON filtering:
+   ```bash
+   # Extract specific fields
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq '.[].name'
+   # Count results
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq 'length'
+   # Filter by condition
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq '[.[] | select(.status == "active")]'
+   ```
+   Prefer `--jq` over piping to Python for JSON processing — it is more token-efficient and avoids unnecessary script complexity.
+
+   **Export Formats** (if the API supports multiple output types):
+   - List supported formats (JSON, CSV, xlsx, parquet, etc.)
+   - Note which are text-safe vs binary
+   - For binary formats: `bash ${CLAUDE_SKILL_DIR}/scripts/myapi export --format xlsx --raw > output.xlsx`
+
+   **Knowledge Delta Principle:** Do not duplicate parameter listings from `--help`. Instead, document which parameters actually matter for common tasks, default behaviors that are surprising, combinations that don't work, and rate limits or response size limits.
 
 The generated skill uses mcp2cli as its execution layer — the baked wrapper script handles all connection details so the SKILL.md stays clean and portable.
