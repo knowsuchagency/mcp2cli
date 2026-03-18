@@ -358,8 +358,11 @@ def load_cached(key: str, ttl: int) -> dict | None:
 
 
 def save_cache(key: str, data: dict):
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (CACHE_DIR / f"{key}.json").write_text(json.dumps(data))
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(CACHE_DIR, 0o700)
+    path = CACHE_DIR / f"{key}.json"
+    path.write_text(json.dumps(data))
+    os.chmod(path, 0o600)
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +378,8 @@ class FileTokenStorage:
     def __init__(self, server_url: str):
         key = hashlib.sha256(server_url.encode()).hexdigest()[:16]
         self._dir = OAUTH_DIR / key
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self._dir, 0o700)
         self._tokens_path = self._dir / "tokens.json"
         self._client_path = self._dir / "client.json"
 
@@ -392,6 +396,7 @@ class FileTokenStorage:
 
     async def set_tokens(self, tokens) -> None:
         self._tokens_path.write_text(tokens.model_dump_json())
+        os.chmod(self._tokens_path, 0o600)
 
     async def get_client_info(self):
         from mcp.shared.auth import OAuthClientInformationFull
@@ -406,6 +411,7 @@ class FileTokenStorage:
 
     async def set_client_info(self, client_info) -> None:
         self._client_path.write_text(client_info.model_dump_json())
+        os.chmod(self._client_path, 0o600)
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -1284,8 +1290,10 @@ def _load_baked(name: str) -> dict | None:
 
 def _save_baked_all(data: dict) -> None:
     """Save all baked configs to disk."""
-    BAKED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BAKED_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(BAKED_FILE.parent, 0o700)
     BAKED_FILE.write_text(json.dumps(data, indent=2) + "\n")
+    os.chmod(BAKED_FILE, 0o600)
 
 
 def _baked_to_argv(config: dict) -> list[str]:
@@ -1424,6 +1432,24 @@ def _bake_create(argv: list[str]) -> None:
         "methods": [x.strip().upper() for x in args.methods.split(",") if x.strip()],
         "description": args.description,
     }
+
+    # C1: Refuse to store plaintext secrets in baked configs.
+    secret = config.get("oauth_client_secret")
+    if secret and not secret.startswith("env:") and not secret.startswith("file:"):
+        print(
+            "Error: oauth_client_secret contains a plaintext value. "
+            "Use 'env:VAR_NAME' or 'file:/path' to reference secrets safely.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    for _hdr_name, hdr_val in config.get("auth_headers", []):
+        if hdr_val and not hdr_val.startswith("env:") and not hdr_val.startswith("file:"):
+            print(
+                f"Error: auth header '{_hdr_name}' contains a plaintext value. "
+                "Use 'env:VAR_NAME' or 'file:/path' to reference secrets safely.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     all_configs[args.name] = config
     _save_baked_all(all_configs)
