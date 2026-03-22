@@ -174,6 +174,20 @@ mcp2cli --graphql https://api.example.com/graphql --search "user"
 echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --stdin
 ```
 
+### Multipart file uploads
+
+When an OpenAPI spec declares `multipart/form-data` with `format: binary` fields, mcp2cli exposes them as file-path CLI arguments:
+
+```bash
+# Upload a file — binary fields accept local file paths
+mcp2cli --spec ./spec.json upload-image --file /path/to/photo.png --caption "My photo"
+
+# Non-binary fields in the same multipart schema become regular flags
+mcp2cli --spec ./spec.json upload-image --file ./image.jpg --title "Cover" --alt-text "A sunset"
+```
+
+File parameters show `(file path)` in `--help` output. MIME types are auto-detected from the file extension.
+
 ### Env vars for stdio servers
 
 ```bash
