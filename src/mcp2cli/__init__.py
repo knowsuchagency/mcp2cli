@@ -8,6 +8,7 @@ import argparse
 import copy
 import hashlib
 import json
+import mimetypes
 import os
 import fnmatch
 import re
@@ -64,6 +65,7 @@ class CommandDef:
     # OpenAPI
     method: str | None = None
     path: str | None = None
+    content_type: str | None = None  # None = json, "multipart/form-data", etc.
     # MCP
     tool_name: str | None = None
     # GraphQL
@@ -322,10 +324,11 @@ def output_result(
         print(json.dumps(data))
 
 
-def _build_http_headers(auth_headers: list[tuple[str, str]]) -> dict[str, str]:
+def _build_http_headers(auth_headers: list[tuple[str, str]], multipart: bool = False) -> dict[str, str]:
     """Build HTTP headers dict from auth_headers with a Content-Type default."""
     headers = dict(auth_headers)
-    headers.setdefault("Content-Type", "application/json")
+    if not multipart:
+        headers.setdefault("Content-Type", "application/json")
     return headers
 
 
@@ -662,19 +665,43 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                 )
                 params.append(p)
 
-            # Request body
-            rb_schema = (
-                details.get("requestBody", {})
-                .get("content", {})
-                .get("application/json", {})
-                .get("schema", {})
+            # Request body — negotiate content type
+            rb_content = details.get("requestBody", {}).get("content", {})
+            multipart_schema = rb_content.get("multipart/form-data", {}).get("schema", {})
+            json_schema = rb_content.get("application/json", {}).get("schema", {})
+
+            mp_props = multipart_schema.get("properties", {})
+            has_binary = any(
+                p.get("format") == "binary" for p in mp_props.values()
             )
+
+            if has_binary:
+                rb_schema = multipart_schema
+                cmd_content_type = "multipart/form-data"
+            elif json_schema:
+                rb_schema = json_schema
+                cmd_content_type = None
+            elif mp_props:
+                rb_schema = multipart_schema
+                cmd_content_type = "multipart/form-data"
+            else:
+                rb_schema = {}
+                cmd_content_type = None
+
             required_fields = set(rb_schema.get("required", []))
             properties = rb_schema.get("properties", {})
             has_body = bool(properties)
 
             for prop_name, prop_schema in properties.items():
-                py_type, suffix = schema_type_to_python(prop_schema)
+                is_binary = (
+                    cmd_content_type == "multipart/form-data"
+                    and prop_schema.get("format") == "binary"
+                )
+                if is_binary:
+                    loc, py_type, suffix = "file", str, " (file path)"
+                else:
+                    py_type, suffix = schema_type_to_python(prop_schema)
+                    loc = "body"
                 p = ParamDef(
                     name=to_kebab(prop_name),
                     original_name=prop_name,
@@ -682,7 +709,7 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                     required=prop_name in required_fields,
                     description=(prop_schema.get("description") or prop_name) + suffix,
                     choices=prop_schema.get("enum"),
-                    location="body",
+                    location=loc,
                 )
                 params.append(p)
 
@@ -694,6 +721,7 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                     has_body=has_body,
                     method=method,
                     path=path,
+                    content_type=cmd_content_type,
                 )
             )
 
@@ -1662,16 +1690,17 @@ def _filter_commands(commands: list[CommandDef], pattern: str) -> list[CommandDe
 def _collect_openapi_params(
     cmd: CommandDef,
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], dict[str, str], dict | None]:
+) -> tuple[str, dict[str, str], dict[str, str], dict | None, dict | None]:
     """Collect OpenAPI params from parsed args, separated by location.
 
-    Returns (path, query_params, extra_headers, body_or_none) where *path*
-    has ``{param}`` placeholders substituted with actual values.
+    Returns (path, query_params, extra_headers, body_or_none, files_or_none)
+    where *path* has ``{param}`` placeholders substituted with actual values.
     """
     path = cmd.path or ""
     query_params: dict[str, str] = {}
     extra_headers: dict[str, str] = {}
     body: dict | None = None
+    files: dict | None = None
 
     for p in cmd.params:
         if p.location == "path":
@@ -1701,6 +1730,17 @@ def _collect_openapi_params(
                     continue
                 if p.location == "path":
                     continue
+                if p.location == "file":
+                    if val is not None:
+                        fp = Path(val)
+                        if not fp.is_file():
+                            print(f"Error: file not found: {val}", file=sys.stderr)
+                            sys.exit(1)
+                        mime = mimetypes.guess_type(val)[0] or "application/octet-stream"
+                        if files is None:
+                            files = {}
+                        files[p.original_name] = (fp.name, open(fp, "rb"), mime)
+                    continue
                 if val is not None:
                     body[p.original_name] = val
             if not body:
@@ -1712,7 +1752,7 @@ def _collect_openapi_params(
                 if val is not None:
                     query_params[p.original_name] = val
 
-    return path, query_params, extra_headers, body
+    return path, query_params, extra_headers, body, files
 
 
 def execute_openapi(
@@ -1727,21 +1767,45 @@ def execute_openapi(
     jq_expr: str | None = None,
     head: int | None = None,
 ):
-    path, query_params, extra_headers, body = _collect_openapi_params(cmd, args)
+    path, query_params, extra_headers, body, files = _collect_openapi_params(cmd, args)
     url = base_url.rstrip("/") + path
 
-    headers = _build_http_headers(auth_headers)
+    is_multipart = files is not None or cmd.content_type == "multipart/form-data"
+    headers = _build_http_headers(auth_headers, multipart=is_multipart)
     headers.update(extra_headers)
 
-    with httpx.Client(timeout=60, auth=oauth_provider) as client:
-        resp = client.request(
-            (cmd.method or "get").upper(),
-            url,
-            headers=headers,
-            params=query_params or None,
-            json=body,
-        )
-        _handle_http_error(resp)
+    try:
+        with httpx.Client(timeout=60, auth=oauth_provider) as client:
+            if files is not None:
+                resp = client.request(
+                    (cmd.method or "get").upper(),
+                    url,
+                    headers=headers,
+                    params=query_params or None,
+                    data=body,
+                    files=files,
+                )
+            elif cmd.content_type == "multipart/form-data":
+                resp = client.request(
+                    (cmd.method or "get").upper(),
+                    url,
+                    headers=headers,
+                    params=query_params or None,
+                    data=body,
+                )
+            else:
+                resp = client.request(
+                    (cmd.method or "get").upper(),
+                    url,
+                    headers=headers,
+                    params=query_params or None,
+                    json=body,
+                )
+            _handle_http_error(resp)
+    finally:
+        if files:
+            for _, file_tuple in files.items():
+                file_tuple[1].close()
 
     if raw:
         sys.stdout.buffer.write(resp.content)

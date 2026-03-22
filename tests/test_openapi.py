@@ -1,5 +1,6 @@
 """Tests for OpenAPI mode — spec loading, argparse building, and execution against a local petstore."""
 
+import argparse
 import json
 import subprocess
 import sys
@@ -7,9 +8,12 @@ import sys
 import pytest
 
 from mcp2cli import (
+    CommandDef,
+    ParamDef,
     build_argparse,
     extract_openapi_commands,
     load_openapi_spec,
+    _collect_openapi_params,
 )
 
 
@@ -238,3 +242,222 @@ class TestExecuteOpenAPI:
         )
         assert r.returncode != 0
         assert "mutually exclusive" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# Multipart / file upload tests
+# ---------------------------------------------------------------------------
+
+def _multipart_spec(*, include_json=False):
+    """Build a minimal OpenAPI spec with a multipart upload endpoint."""
+    content = {
+        "multipart/form-data": {
+            "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "The image to upload",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Image caption",
+                    },
+                },
+            }
+        }
+    }
+    if include_json:
+        content["application/json"] = {
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Image URL"},
+                },
+            }
+        }
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "test", "version": "1"},
+        "paths": {
+            "/upload": {
+                "post": {
+                    "operationId": "uploadImage",
+                    "summary": "Upload an image",
+                    "requestBody": {"content": content},
+                }
+            }
+        },
+    }
+
+
+def _multipart_no_binary_spec():
+    """Multipart spec with no binary fields (pure form-data)."""
+    return {
+        "openapi": "3.0.0",
+        "info": {"title": "test", "version": "1"},
+        "paths": {
+            "/submit": {
+                "post": {
+                    "operationId": "submitForm",
+                    "summary": "Submit a form",
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "age": {"type": "integer"},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+
+class TestMultipartExtraction:
+    def test_binary_field_gets_file_location(self):
+        cmds = extract_openapi_commands(_multipart_spec())
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        assert cmd.content_type == "multipart/form-data"
+        file_param = next(p for p in cmd.params if p.original_name == "file")
+        assert file_param.location == "file"
+        assert file_param.python_type is str
+        assert "(file path)" in file_param.description
+
+    def test_non_binary_field_stays_body(self):
+        cmds = extract_openapi_commands(_multipart_spec())
+        cmd = cmds[0]
+        caption_param = next(p for p in cmd.params if p.original_name == "caption")
+        assert caption_param.location == "body"
+
+    def test_multipart_preferred_over_json_when_binary(self):
+        cmds = extract_openapi_commands(_multipart_spec(include_json=True))
+        cmd = cmds[0]
+        assert cmd.content_type == "multipart/form-data"
+        # Should have file + caption from multipart, not url from JSON
+        names = {p.original_name for p in cmd.params}
+        assert "file" in names
+        assert "caption" in names
+        assert "url" not in names
+
+    def test_json_preferred_when_no_binary(self):
+        """When both JSON and multipart exist but multipart has no binary fields, prefer JSON."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "test", "version": "1"},
+            "paths": {
+                "/data": {
+                    "post": {
+                        "operationId": "postData",
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "value": {"type": "string"},
+                                        },
+                                    }
+                                },
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "value": {"type": "string"},
+                                        },
+                                    }
+                                },
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        cmds = extract_openapi_commands(spec)
+        cmd = cmds[0]
+        assert cmd.content_type is None  # JSON chosen
+
+    def test_multipart_no_binary_fallback(self):
+        """When only multipart exists with no binary fields, use it as form-data."""
+        cmds = extract_openapi_commands(_multipart_no_binary_spec())
+        cmd = cmds[0]
+        assert cmd.content_type == "multipart/form-data"
+        assert all(p.location == "body" for p in cmd.params)
+
+    def test_argparse_file_param(self):
+        cmds = extract_openapi_commands(_multipart_spec())
+        pre = argparse.ArgumentParser(add_help=False)
+        parser = build_argparse(cmds, pre)
+        args = parser.parse_args(["upload-image", "--file", "/tmp/test.png", "--caption", "hello"])
+        assert args.file == "/tmp/test.png"
+        assert args.caption == "hello"
+
+
+class TestCollectMultipartParams:
+    def test_file_params_returned_separately(self, tmp_path):
+        # Create a real temp file
+        test_file = tmp_path / "photo.png"
+        test_file.write_bytes(b"\x89PNG\r\n")
+
+        cmd = CommandDef(
+            name="upload",
+            method="post",
+            path="/upload",
+            has_body=True,
+            content_type="multipart/form-data",
+            params=[
+                ParamDef(name="file", original_name="file", python_type=str, location="file"),
+                ParamDef(name="caption", original_name="caption", python_type=str, location="body"),
+            ],
+        )
+        args = argparse.Namespace(file=str(test_file), caption="my photo", stdin=False)
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+
+        assert body == {"caption": "my photo"}
+        assert files is not None
+        assert "file" in files
+        name, fh, mime = files["file"]
+        assert name == "photo.png"
+        assert mime == "image/png"
+        fh.close()
+
+    def test_file_not_found_exits(self):
+        cmd = CommandDef(
+            name="upload",
+            method="post",
+            path="/upload",
+            has_body=True,
+            content_type="multipart/form-data",
+            params=[
+                ParamDef(name="file", original_name="file", python_type=str, location="file"),
+            ],
+        )
+        args = argparse.Namespace(file="/nonexistent/file.png", stdin=False)
+        with pytest.raises(SystemExit):
+            _collect_openapi_params(cmd, args)
+
+    def test_no_files_when_param_not_provided(self):
+        cmd = CommandDef(
+            name="upload",
+            method="post",
+            path="/upload",
+            has_body=True,
+            content_type="multipart/form-data",
+            params=[
+                ParamDef(name="file", original_name="file", python_type=str, location="file"),
+                ParamDef(name="caption", original_name="caption", python_type=str, location="body"),
+            ],
+        )
+        args = argparse.Namespace(file=None, caption="hello", stdin=False)
+        _, _, _, body, files = _collect_openapi_params(cmd, args)
+        assert files is None
+        assert body == {"caption": "hello"}
