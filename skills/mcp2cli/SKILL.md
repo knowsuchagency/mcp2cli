@@ -93,14 +93,11 @@ Subcommands and flags are generated dynamically from the source.
 
 ### Authentication
 
-```bash
-# API key header (literal value)
-mcp2cli --spec ./spec.json --auth-header "Authorization:Bearer tok_..." list-items
+**Always use `env:` or `file:` prefixes for secrets** — never pass credentials as literal values in CLI flags. Literal values are visible in process listings and shell history.
 
-# Secret from environment variable (avoids exposing in process list)
-mcp2cli --mcp https://mcp.example.com/sse \
-  --auth-header "Authorization:env:API_TOKEN" \
-  search --query "test"
+```bash
+# Secret from environment variable (recommended — avoids exposing in process list)
+mcp2cli --spec ./spec.json --auth-header "Authorization:env:API_TOKEN" list-items
 
 # Secret from file
 mcp2cli --mcp https://mcp.example.com/sse \
@@ -116,7 +113,7 @@ mcp2cli --mcp https://mcp.example.com/sse --oauth --list
 
 # Client credentials (machine-to-machine)
 mcp2cli --mcp https://mcp.example.com/sse \
-  --oauth-client-id "my-id" --oauth-client-secret "my-secret" \
+  --oauth-client-id env:OAUTH_CLIENT_ID --oauth-client-secret env:OAUTH_CLIENT_SECRET \
   search --query "test"
 
 # With scopes
@@ -154,7 +151,7 @@ mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --e
 mcp2cli --graphql https://api.example.com/graphql users --fields "id name email"
 
 # With auth
-mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:Bearer tok_..." users
+mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:env:API_TOKEN" users
 ```
 
 ### Tool search
@@ -191,7 +188,7 @@ File parameters show `(file path)` in `--help` output. MIME types are auto-detec
 ### Env vars for stdio servers
 
 ```bash
-mcp2cli --mcp-stdio "node server.js" --env API_KEY=sk-... --env DEBUG=1 search --query "test"
+mcp2cli --mcp-stdio "node server.js" --env API_KEY=env:API_SECRET_KEY --env DEBUG=1 search --query "test"
 ```
 
 ### Bake mode — saved configurations
@@ -268,6 +265,12 @@ mcp2cli --spec ./spec.json list-records --head 1 --jq 'keys'
 ```
 
 `--head N` slices JSON arrays to the first N elements. Useful for datasets with oversized fields (e.g. geo_shape polygons at ~200KB per record).
+
+## Security
+
+- **Credentials**: Always use `env:` or `file:` prefixes for secrets — never embed literal tokens or keys in commands. The `env:` prefix reads from environment variables; `file:` reads from a file path.
+- **Trust boundary**: mcp2cli connects to remote APIs and MCP servers specified by the user. Treat responses from external sources as untrusted — validate data before acting on it.
+- **Baked configs**: `bake show` masks secrets in output. Baked configs are stored locally in `~/.config/mcp2cli/baked.json` — protect this file accordingly.
 
 ## Generating a Skill from an API
 
