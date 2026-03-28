@@ -497,7 +497,7 @@ def build_oauth_provider(
     from mcp.client.auth.oauth2 import OAuthClientProvider
     from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 
-    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1"}
+    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
     if redirect_uri is not None:
         parsed = urlparse(redirect_uri)
@@ -518,7 +518,7 @@ def build_oauth_provider(
         if (parsed.hostname or "") not in _LOOPBACK_HOSTS:
             print(
                 f"Error: --oauth-redirect-uri host must be a loopback address "
-                f"(localhost or 127.0.0.1), got '{parsed.hostname}'.",
+                f"(localhost, 127.0.0.1, or ::1), got '{parsed.hostname}'.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -557,7 +557,15 @@ def build_oauth_provider(
     _CallbackHandler.error = None
     _CallbackHandler.done = threading.Event()
 
-    server = HTTPServer((callback_host, port), _CallbackHandler)
+    if callback_host == "::1":
+        import socket as _socket
+
+        class _IPv6HTTPServer(HTTPServer):
+            address_family = _socket.AF_INET6
+
+        server = _IPv6HTTPServer((callback_host, port), _CallbackHandler)
+    else:
+        server = HTTPServer((callback_host, port), _CallbackHandler)
 
     async def redirect_handler(auth_url: str) -> None:
         print(f"Opening browser for authorization...", file=sys.stderr)
