@@ -134,6 +134,81 @@ class TestBuildOAuthProvider:
 
         assert isinstance(provider, OAuthClientProvider)
 
+    def test_auth_code_uses_custom_redirect_uri(self):
+        """When redirect_uri is given the provider uses it verbatim."""
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        custom_uri = "http://localhost:19876/oauth/callback"
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            redirect_uri=custom_uri,
+        )
+        assert isinstance(provider, OAuthClientProvider)
+        redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
+        assert custom_uri in redirect_uris
+
+    def test_redirect_uri_https_rejected(self):
+        with pytest.raises(SystemExit):
+            mcp2cli.build_oauth_provider(
+                "https://example.com/mcp",
+                redirect_uri="https://localhost:3334/callback",
+            )
+
+    def test_redirect_uri_no_port_rejected(self):
+        with pytest.raises(SystemExit):
+            mcp2cli.build_oauth_provider(
+                "https://example.com/mcp",
+                redirect_uri="http://localhost/callback",
+            )
+
+    def test_redirect_uri_non_loopback_rejected(self):
+        with pytest.raises(SystemExit):
+            mcp2cli.build_oauth_provider(
+                "https://example.com/mcp",
+                redirect_uri="http://example.com:3334/callback",
+            )
+
+    def test_auth_code_random_port_when_no_redirect_uri(self, monkeypatch):
+        """Without redirect_uri, _find_free_port() is called and the default URI is built."""
+        called_with = []
+
+        original = mcp2cli._find_free_port
+
+        def patched():
+            port = original()
+            called_with.append(port)
+            return port
+
+        monkeypatch.setattr(mcp2cli, "_find_free_port", patched)
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
+        assert isinstance(provider, OAuthClientProvider)
+        assert len(called_with) == 1
+        expected_uri = f"http://127.0.0.1:{called_with[0]}/callback"
+        redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
+        assert expected_uri in redirect_uris
+
+    def test_client_id_only_preseeds_storage(self, tmp_path, monkeypatch):
+        """client_id without client_secret pre-seeds client.json to skip DCR."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            client_id="pre-configured-id",
+            redirect_uri="http://localhost:19877/oauth/callback",
+        )
+        assert isinstance(provider, OAuthClientProvider)
+
+        storage = mcp2cli.FileTokenStorage("https://example.com/mcp")
+        assert storage._client_path.exists()
+        import json
+        data = json.loads(storage._client_path.read_text())
+        assert data["client_id"] == "pre-configured-id"
+        assert data.get("client_secret") is None
+        assert data.get("token_endpoint_auth_method") == "none"
+
     def test_find_free_port(self):
         port = mcp2cli._find_free_port()
         assert isinstance(port, int)
@@ -147,10 +222,11 @@ class TestOAuthCLIValidation:
         cmd = [sys.executable, "-m", "mcp2cli", *args]
         return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
-    def test_client_id_without_secret_errors(self):
-        r = self._run("--mcp", "https://example.com/mcp", "--oauth-client-id", "id", "--list")
-        assert r.returncode != 0
-        assert "--oauth-client-secret" in r.stderr
+    def test_client_id_without_secret_accepted(self):
+        """--oauth-client-id alone is valid (pre-configured client, no DCR)."""
+        r = self._run("--mcp", "https://example.com/mcp", "--oauth-client-id", "my-id", "--list")
+        # Flag combination itself must not produce a validation error
+        assert "--oauth-client-secret" not in r.stderr
 
     def test_client_secret_without_id_errors(self):
         r = self._run("--mcp", "https://example.com/mcp", "--oauth-client-secret", "secret", "--list")
@@ -185,6 +261,7 @@ class TestOAuthCLIValidation:
         assert "--oauth-client-id" in r.stdout
         assert "--oauth-client-secret" in r.stdout
         assert "--oauth-scope" in r.stdout
+        assert "--oauth-redirect-uri" in r.stdout
 
     def test_env_secret_in_client_id(self):
         """--oauth-client-id env:VAR should resolve from environment."""

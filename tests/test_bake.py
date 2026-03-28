@@ -204,6 +204,41 @@ class TestBakedToArgv:
         assert "--oauth-scope" in argv
         assert "--transport" in argv
         assert "sse" in argv
+        assert "--oauth-redirect-uri" not in argv
+
+    def test_oauth_redirect_uri_roundtrip(self):
+        custom_uri = "http://localhost:18080/oauth/callback"
+        cfg = {
+            "source_type": "mcp",
+            "source": "https://mcp.example.com",
+            "auth_headers": [],
+            "env_vars": {},
+            "cache_ttl": 3600,
+            "transport": "auto",
+            "oauth": True,
+            "oauth_client_id": None,
+            "oauth_client_secret": None,
+            "oauth_scope": None,
+            "oauth_redirect_uri": custom_uri,
+        }
+        argv = _baked_to_argv(cfg)
+        assert "--oauth-redirect-uri" in argv
+        idx = argv.index("--oauth-redirect-uri")
+        assert argv[idx + 1] == custom_uri
+
+    def test_oauth_redirect_uri_none_omitted(self):
+        cfg = {
+            "source_type": "mcp",
+            "source": "https://mcp.example.com",
+            "auth_headers": [],
+            "env_vars": {},
+            "cache_ttl": 3600,
+            "transport": "auto",
+            "oauth": True,
+            "oauth_redirect_uri": None,
+        }
+        argv = _baked_to_argv(cfg)
+        assert "--oauth-redirect-uri" not in argv
 
 
 # ---------------------------------------------------------------------------

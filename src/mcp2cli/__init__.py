@@ -466,11 +466,18 @@ def build_oauth_provider(
     client_id: str | None = None,
     client_secret: str | None = None,
     scope: str | None = None,
+    redirect_uri: str | None = None,
 ) -> "httpx.Auth":
     """Build an OAuth provider for HTTP connections.
 
-    If client_id and client_secret are provided, uses client credentials flow.
-    Otherwise, uses authorization code + PKCE with a local callback server.
+    - client_id + client_secret  → client credentials flow (machine-to-machine).
+    - client_id only             → authorization code + PKCE, pre-configured client
+                                   (no dynamic client registration).
+    - neither                    → authorization code + PKCE with dynamic client
+                                   registration.
+
+    redirect_uri controls the full callback URL (scheme, host, port, path).
+    When None, defaults to http://127.0.0.1:<random-free-port>/callback.
     """
     storage = FileTokenStorage(server_url)
 
@@ -488,10 +495,39 @@ def build_oauth_provider(
         )
 
     from mcp.client.auth.oauth2 import OAuthClientProvider
-    from mcp.shared.auth import OAuthClientMetadata
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 
-    port = _find_free_port()
-    redirect_uri = f"http://127.0.0.1:{port}/callback"
+    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1"}
+
+    if redirect_uri is not None:
+        parsed = urlparse(redirect_uri)
+        if parsed.scheme != "http":
+            print(
+                f"Error: --oauth-redirect-uri must use http://, got '{parsed.scheme}://'. "
+                "The local callback server is plain HTTP; use http://<host>:<port>/path.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if parsed.port is None:
+            print(
+                "Error: --oauth-redirect-uri must include an explicit port number "
+                "(e.g. http://localhost:3334/oauth/callback).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if (parsed.hostname or "") not in _LOOPBACK_HOSTS:
+            print(
+                f"Error: --oauth-redirect-uri host must be a loopback address "
+                f"(localhost or 127.0.0.1), got '{parsed.hostname}'.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        callback_host = parsed.hostname
+        port = parsed.port
+    else:
+        port = _find_free_port()
+        callback_host = "127.0.0.1"
+        redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     client_metadata = OAuthClientMetadata(
         redirect_uris=[redirect_uri],
@@ -500,13 +536,28 @@ def build_oauth_provider(
         scope=scope,
     )
 
+    if client_id:
+        # Pre-seed storage with the caller-supplied client_id so the OAuth
+        # provider skips dynamic client registration entirely.  The write is
+        # synchronous (plain file I/O) so no async context is needed here.
+        pre_client_info = OAuthClientInformationFull(
+            client_id=client_id,
+            client_secret=None,
+            token_endpoint_auth_method="none",
+            redirect_uris=[redirect_uri],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope=scope,
+        )
+        storage._client_path.write_text(pre_client_info.model_dump_json())
+
     # Reset callback handler state
     _CallbackHandler.auth_code = None
     _CallbackHandler.state = None
     _CallbackHandler.error = None
     _CallbackHandler.done = threading.Event()
 
-    server = HTTPServer(("127.0.0.1", port), _CallbackHandler)
+    server = HTTPServer((callback_host, port), _CallbackHandler)
 
     async def redirect_handler(auth_url: str) -> None:
         print(f"Opening browser for authorization...", file=sys.stderr)
@@ -1353,6 +1404,8 @@ def _baked_to_argv(config: dict) -> list[str]:
         argv += ["--oauth-client-secret", config["oauth_client_secret"]]
     if config.get("oauth_scope"):
         argv += ["--oauth-scope", config["oauth_scope"]]
+    if config.get("oauth_redirect_uri"):
+        argv += ["--oauth-redirect-uri", config["oauth_redirect_uri"]]
     return argv
 
 
@@ -1400,6 +1453,7 @@ def _bake_create(argv: list[str]) -> None:
     p.add_argument("--oauth-client-id", default=None)
     p.add_argument("--oauth-client-secret", default=None)
     p.add_argument("--oauth-scope", default=None)
+    p.add_argument("--oauth-redirect-uri", default=None, metavar="URI")
     p.add_argument("--include", default="", help="Comma-separated include globs")
     p.add_argument("--exclude", default="", help="Comma-separated exclude globs")
     p.add_argument("--methods", default="", help="Comma-separated HTTP methods")
@@ -1453,6 +1507,7 @@ def _bake_create(argv: list[str]) -> None:
         "oauth_client_id": args.oauth_client_id,
         "oauth_client_secret": args.oauth_client_secret,
         "oauth_scope": args.oauth_scope,
+        "oauth_redirect_uri": args.oauth_redirect_uri,
         "include": [x.strip() for x in args.include.split(",") if x.strip()],
         "exclude": [x.strip() for x in args.exclude.split(",") if x.strip()],
         "methods": [x.strip().upper() for x in args.methods.split(",") if x.strip()],
@@ -2985,6 +3040,13 @@ def _build_main_parser() -> argparse.ArgumentParser:
         default=None,
         help="OAuth scope(s) to request",
     )
+    pre.add_argument(
+        "--oauth-redirect-uri",
+        default=None,
+        metavar="URI",
+        help="Full redirect URI for the OAuth callback (e.g. http://localhost:3334/oauth/callback). "
+             "Overrides the default http://127.0.0.1:<random-port>/callback.",
+    )
     # Resource flags
     pre.add_argument(
         "--list-resources", action="store_true", help="List available resources"
@@ -3066,12 +3128,6 @@ def _setup_oauth(pre_args):
     if not use_oauth:
         return None
 
-    if pre_args.oauth_client_id and not pre_args.oauth_client_secret:
-        print(
-            "Error: --oauth-client-secret is required with --oauth-client-id",
-            file=sys.stderr,
-        )
-        sys.exit(1)
     if pre_args.oauth_client_secret and not pre_args.oauth_client_id:
         print(
             "Error: --oauth-client-id is required with --oauth-client-secret",
@@ -3109,6 +3165,7 @@ def _setup_oauth(pre_args):
         client_id=client_id,
         client_secret=client_secret,
         scope=pre_args.oauth_scope,
+        redirect_uri=pre_args.oauth_redirect_uri,
     )
 
 
