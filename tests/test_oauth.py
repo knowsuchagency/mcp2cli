@@ -168,6 +168,16 @@ class TestBuildOAuthProvider:
                 redirect_uri="http://example.com:3334/callback",
             )
 
+    def test_redirect_uri_ipv6_loopback_accepted(self):
+        """::1 (IPv6 loopback) should be accepted as a valid redirect host."""
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            redirect_uri="http://[::1]:19878/callback",
+        )
+        assert isinstance(provider, OAuthClientProvider)
+
     def test_auth_code_random_port_when_no_redirect_uri(self, monkeypatch):
         """Without redirect_uri, _find_free_port() is called and the default URI is built."""
         called_with = []

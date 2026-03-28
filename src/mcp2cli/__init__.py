@@ -497,7 +497,7 @@ def build_oauth_provider(
     from mcp.client.auth.oauth2 import OAuthClientProvider
     from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 
-    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1"}
+    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
     if redirect_uri is not None:
         parsed = urlparse(redirect_uri)
@@ -518,7 +518,7 @@ def build_oauth_provider(
         if (parsed.hostname or "") not in _LOOPBACK_HOSTS:
             print(
                 f"Error: --oauth-redirect-uri host must be a loopback address "
-                f"(localhost or 127.0.0.1), got '{parsed.hostname}'.",
+                f"(localhost, 127.0.0.1, or ::1), got '{parsed.hostname}'.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -538,8 +538,7 @@ def build_oauth_provider(
 
     if client_id:
         # Pre-seed storage with the caller-supplied client_id so the OAuth
-        # provider skips dynamic client registration entirely.  The write is
-        # synchronous (plain file I/O) so no async context is needed here.
+        # provider skips dynamic client registration entirely.
         pre_client_info = OAuthClientInformationFull(
             client_id=client_id,
             client_secret=None,
@@ -557,7 +556,15 @@ def build_oauth_provider(
     _CallbackHandler.error = None
     _CallbackHandler.done = threading.Event()
 
-    server = HTTPServer((callback_host, port), _CallbackHandler)
+    if callback_host == "::1":
+        import socket as _socket
+
+        class _IPv6HTTPServer(HTTPServer):
+            address_family = _socket.AF_INET6
+
+        server = _IPv6HTTPServer((callback_host, port), _CallbackHandler)
+    else:
+        server = HTTPServer((callback_host, port), _CallbackHandler)
 
     async def redirect_handler(auth_url: str) -> None:
         print(f"Opening browser for authorization...", file=sys.stderr)
