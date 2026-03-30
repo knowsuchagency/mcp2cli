@@ -1161,8 +1161,110 @@ def extract_graphql_commands(schema: dict) -> list[CommandDef]:
     return commands
 
 
-def list_graphql_commands(commands: list[CommandDef]):
+def _truncate_description(description: str, max_len: int) -> str:
+    """Truncate at a word boundary and append '...'."""
+    if len(description) <= max_len:
+        return description
+    return description[:max_len].rsplit(" ", 1)[0].rstrip() + "..."
+
+
+def _wrap_description(description: str, indent: int, total_width: int = 110) -> str:
+    """Wrap long descriptions; indent continuation lines to align with description column."""
+    import textwrap
+    return textwrap.fill(
+        description,
+        width=total_width,
+        subsequent_indent=" " * indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+def _summarize_descriptions(commands: list[CommandDef]) -> list[CommandDef]:
+    """Return a copy of commands with AI-summarized descriptions (one sentence each).
+
+    Checks for API keys in this order:
+      1. OPENAI_API_KEY (uses OPENAI_BASE_URL / MCP2CLI_SUMMARIZE_MODEL or gpt-4o-mini)
+      2. ANTHROPIC_API_KEY (uses MCP2CLI_SUMMARIZE_MODEL or claude-haiku-4-5-20251001)
+
+    Falls back to unchanged descriptions with a warning if no key is found.
+    """
+    import copy
+
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    if not openai_key and not anthropic_key:
+        print(
+            "Warning: --summarize requires OPENAI_API_KEY or ANTHROPIC_API_KEY. "
+            "Falling back to default descriptions.",
+            file=sys.stderr,
+        )
+        return commands
+
+    descriptions = [
+        {"name": cmd.name, "description": cmd.description or ""}
+        for cmd in commands
+    ]
+    prompt = (
+        "You are a concise technical writer. For each tool below, rewrite its description "
+        "as a single short sentence (max 80 characters). Respond ONLY with a JSON array "
+        "of objects with 'name' and 'summary' keys, in the same order as the input. "
+        "No markdown fences, no extra text.\n\n"
+        f"Tools:\n{json.dumps(descriptions, indent=2)}"
+    )
+
+    try:
+        if openai_key:
+            base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            model = os.environ.get("MCP2CLI_SUMMARIZE_MODEL", "gpt-4o-mini")
+            response = httpx.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024},
+                timeout=30,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            model = os.environ.get("MCP2CLI_SUMMARIZE_MODEL", "claude-haiku-4-5-20251001")
+            response = httpx.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json={"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 1024},
+                timeout=30,
+            )
+            response.raise_for_status()
+            content = response.json()["content"][0]["text"].strip()
+
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = "\n".join(content.split("\n")[1:])  # drop opening fence line
+            content = content.rsplit("```", 1)[0]         # drop closing fence
+        summaries = {item["name"]: item["summary"] for item in json.loads(content.strip())}
+
+        result = []
+        for cmd in commands:
+            cmd_copy = copy.copy(cmd)
+            if cmd.name in summaries:
+                cmd_copy.description = summaries[cmd.name]
+            result.append(cmd_copy)
+        return result
+
+    except Exception as e:
+        print(f"Warning: --summarize failed ({e}). Falling back to default descriptions.", file=sys.stderr)
+        return commands
+
+
+def list_graphql_commands(commands: list[CommandDef], verbose: bool = False, summarize: bool = False):
     """Group commands by operation type and print."""
+    if summarize:
+        commands = _summarize_descriptions(commands)
+
     groups: dict[str, list[CommandDef]] = {}
     for cmd in commands:
         key = cmd.graphql_operation_type or "other"
@@ -1175,7 +1277,14 @@ def list_graphql_commands(commands: list[CommandDef]):
         label = "queries" if group == "query" else "mutations"
         print(f"\n{label}:")
         for cmd in cmds:
-            desc = f"  {cmd.description[:60]}" if cmd.description else ""
+            if cmd.description:
+                if verbose:
+                    wrapped = _wrap_description(cmd.description, indent=42, total_width=100)
+                    desc = f"  {wrapped}"
+                else:
+                    desc = f"  {_truncate_description(cmd.description, 60)}"
+            else:
+                desc = ""
             print(f"  {cmd.name:<40}{desc}")
 
 
@@ -1291,18 +1400,20 @@ def handle_graphql(
     oauth_provider: "httpx.Auth | None" = None,
     jq_expr: str | None = None,
     head: int | None = None,
+    verbose: bool = False,
+    summarize: bool = False,
 ):
     """Top-level handler for --graphql mode."""
     schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider)
     commands = extract_graphql_commands(schema)
 
     if list_mode:
-        list_graphql_commands(commands)
+        list_graphql_commands(commands, verbose=verbose, summarize=summarize)
         return
 
     if not remaining:
         print("Available operations:")
-        list_graphql_commands(commands)
+        list_graphql_commands(commands, verbose=verbose, summarize=summarize)
         print("\nUse --list for the same output, or provide a subcommand.")
         return
 
@@ -1721,7 +1832,10 @@ def build_argparse(
 # ---------------------------------------------------------------------------
 
 
-def list_openapi_commands(commands: list[CommandDef]):
+def list_openapi_commands(commands: list[CommandDef], verbose: bool = False, summarize: bool = False):
+    if summarize:
+        commands = _summarize_descriptions(commands)
+
     groups: dict[str, list[CommandDef]] = {}
     for cmd in commands:
         prefix = cmd.name.split("-", 1)[0] if "-" in cmd.name else "other"
@@ -1733,13 +1847,27 @@ def list_openapi_commands(commands: list[CommandDef]):
             method = (cmd.method or "").upper()
             line = f"  {cmd.name:<45} {method:<6}"
             if cmd.description:
-                line += f" {cmd.description[:60]}"
+                if verbose:
+                    wrapped = _wrap_description(cmd.description, indent=54, total_width=110)
+                    line += f" {wrapped}"
+                else:
+                    line += f" {_truncate_description(cmd.description, 60)}"
             print(line)
 
 
-def list_mcp_commands(commands: list[CommandDef]):
+def list_mcp_commands(commands: list[CommandDef], verbose: bool = False, summarize: bool = False):
+    if summarize:
+        commands = _summarize_descriptions(commands)
+
     for cmd in commands:
-        desc = f"  {cmd.description[:70]}" if cmd.description else ""
+        if cmd.description:
+            if verbose:
+                wrapped = _wrap_description(cmd.description, indent=42, total_width=110)
+                desc = f"  {wrapped}"
+            else:
+                desc = f"  {_truncate_description(cmd.description, 70)}"
+        else:
+            desc = ""
         print(f"  {cmd.name:<40}{desc}")
 
 
@@ -1919,6 +2047,8 @@ def run_mcp_http(
     search_pattern: str | None = None,
     jq_expr: str | None = None,
     head: int | None = None,
+    verbose: bool = False,
+    summarize: bool = False,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -1929,6 +2059,8 @@ def run_mcp_http(
         search_pattern=search_pattern,
         jq_expr=jq_expr,
         head=head,
+        verbose=verbose,
+        summarize=summarize,
     )
 
     async def _run():
@@ -2014,6 +2146,8 @@ def run_mcp_stdio(
     search_pattern: str | None = None,
     jq_expr: str | None = None,
     head: int | None = None,
+    verbose: bool = False,
+    summarize: bool = False,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -2024,6 +2158,8 @@ def run_mcp_stdio(
         search_pattern=search_pattern,
         jq_expr=jq_expr,
         head=head,
+        verbose=verbose,
+        summarize=summarize,
     )
 
     import anyio
@@ -2075,6 +2211,8 @@ async def _mcp_session(
     search_pattern: str | None = None,
     jq_expr: str | None = None,
     head: int | None = None,
+    verbose: bool = False,
+    summarize: bool = False,
 ):
     # Handle resource operations
     if resource_action:
@@ -2111,7 +2249,7 @@ async def _mcp_session(
             print(f"\nTools matching '{search_pattern}':")
         else:
             print("\nAvailable tools:")
-        list_mcp_commands(commands)
+        list_mcp_commands(commands, verbose=verbose, summarize=summarize)
         return
 
     if tool_name is None:
@@ -2729,6 +2867,8 @@ def handle_mcp(
     bake_config: BakeConfig | None = None,
     jq_expr: str | None = None,
     head: int | None = None,
+    verbose: bool = False,
+    summarize: bool = False,
 ):
     key = cache_key_override or cache_key_for(source)
 
@@ -2763,7 +2903,7 @@ def handle_mcp(
                 commands, bake_config.include, bake_config.exclude, bake_config.methods,
             )
             print("\nAvailable tools:")
-            list_mcp_commands(commands)
+            list_mcp_commands(commands, verbose=verbose, summarize=summarize)
             return
         _dispatch_mcp_call(
             source, is_stdio, auth_headers, env_vars,
@@ -2771,6 +2911,7 @@ def handle_mcp(
             toon=toon, transport=transport, oauth_provider=oauth_provider,
             search_pattern=search_pattern,
             jq_expr=jq_expr, head=head,
+            verbose=verbose, summarize=summarize,
         )
         return
 
@@ -2788,7 +2929,7 @@ def handle_mcp(
 
     if not remaining:
         print("Available tools:")
-        list_mcp_commands(commands)
+        list_mcp_commands(commands, verbose=verbose, summarize=summarize)
         print("\nUse --list for the same output, or provide a subcommand.")
         return
 
@@ -2985,6 +3126,22 @@ def _build_main_parser() -> argparse.ArgumentParser:
         dest="search_pattern",
         metavar="PATTERN",
         help="Search tools by name or description (case-insensitive substring match)",
+    )
+    pre.add_argument(
+        "--verbose",
+        action="store_true",
+        dest="verbose",
+        help="Show full tool descriptions in --list output, wrapped to terminal width (default: truncated with ...)",
+    )
+    pre.add_argument(
+        "--summarize",
+        action="store_true",
+        dest="summarize",
+        help=(
+            "Use an LLM to generate one-sentence summaries in --list output. "
+            "Requires OPENAI_API_KEY or ANTHROPIC_API_KEY. "
+            "Override model with MCP2CLI_SUMMARIZE_MODEL."
+        ),
     )
     pre.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     pre.add_argument("--raw", action="store_true", help="Print raw response body")
@@ -3286,7 +3443,7 @@ def _handle_session_operations(
             print(f"\nTools matching '{search_pattern}':")
         else:
             print("\nAvailable tools:")
-        list_mcp_commands(commands)
+        list_mcp_commands(commands, verbose=pre_args.verbose, summarize=pre_args.summarize)
         return True
 
     # Tool call via session
@@ -3294,7 +3451,7 @@ def _handle_session_operations(
         result = _session_request(sess_name, "list_tools")
         commands = extract_mcp_commands(result)
         print("Available tools:")
-        list_mcp_commands(commands)
+        list_mcp_commands(commands, verbose=pre_args.verbose, summarize=pre_args.summarize)
         print("\nUse --list for the same output, or provide a subcommand.")
         return True
 
@@ -3391,7 +3548,7 @@ def _handle_openapi_mode(
                 print(f"\nNo tools matching '{search_pattern}'.")
                 return
             print(f"\nTools matching '{search_pattern}':")
-        list_openapi_commands(commands)
+        list_openapi_commands(commands, verbose=pre_args.verbose, summarize=pre_args.summarize)
         return
 
     if not remaining:
@@ -3493,6 +3650,8 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             oauth_provider=oauth_provider,
             jq_expr=pre_args.jq,
             head=pre_args.head,
+            verbose=pre_args.verbose,
+            summarize=pre_args.summarize,
         )
         return
 
@@ -3524,6 +3683,8 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             bake_config=bake_config,
             jq_expr=pre_args.jq,
             head=pre_args.head,
+            verbose=pre_args.verbose,
+            summarize=pre_args.summarize,
         )
         return
 
