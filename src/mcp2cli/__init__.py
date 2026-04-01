@@ -467,21 +467,34 @@ def build_oauth_provider(
     client_secret: str | None = None,
     scope: str | None = None,
     redirect_uri: str | None = None,
+    flow: str = "auto",
 ) -> "httpx.Auth":
     """Build an OAuth provider for HTTP connections.
 
-    - client_id + client_secret  → client credentials flow (machine-to-machine).
-    - client_id only             → authorization code + PKCE, pre-configured client
-                                   (no dynamic client registration).
-    - neither                    → authorization code + PKCE with dynamic client
-                                   registration.
+    The ``flow`` parameter controls which grant type is used:
+
+    - ``"auto"`` (default): client_id + client_secret → client credentials;
+      client_id only → authorization code + PKCE (public client);
+      neither → authorization code + PKCE with dynamic client registration.
+    - ``"authorization_code"``: always use authorization code + PKCE.
+      When a client_secret is also provided the token-endpoint request
+      authenticates as a confidential client (``client_secret_post``).
+      This is required by servers like Slack that issue confidential OAuth
+      clients but only support the authorization-code grant.
+    - ``"client_credentials"``: always use client credentials (requires both
+      client_id and client_secret).
 
     redirect_uri controls the full callback URL (scheme, host, port, path).
     When None, defaults to http://127.0.0.1:<random-free-port>/callback.
     """
     storage = FileTokenStorage(server_url)
 
-    if client_id and client_secret:
+    use_client_credentials = (
+        flow == "client_credentials"
+        or (flow == "auto" and client_id and client_secret)
+    )
+
+    if use_client_credentials:
         from mcp.client.auth.extensions.client_credentials import (
             ClientCredentialsOAuthProvider,
         )
@@ -540,10 +553,18 @@ def build_oauth_provider(
         # Pre-seed storage with the caller-supplied client_id so the OAuth
         # provider skips dynamic client registration entirely.  The write is
         # synchronous (plain file I/O) so no async context is needed here.
+        #
+        # When a client_secret is provided (confidential client, e.g. Slack),
+        # include it and use client_secret_post so the token-endpoint request
+        # sends the secret in the POST body.
+        if client_secret:
+            auth_method = "client_secret_post"
+        else:
+            auth_method = "none"
         pre_client_info = OAuthClientInformationFull(
             client_id=client_id,
-            client_secret=None,
-            token_endpoint_auth_method="none",
+            client_secret=client_secret,
+            token_endpoint_auth_method=auth_method,
             redirect_uris=[redirect_uri],
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],
@@ -1442,6 +1463,8 @@ def _baked_to_argv(config: dict) -> list[str]:
         argv += ["--oauth-scope", config["oauth_scope"]]
     if config.get("oauth_redirect_uri"):
         argv += ["--oauth-redirect-uri", config["oauth_redirect_uri"]]
+    if config.get("oauth_flow") and config["oauth_flow"] != "auto":
+        argv += ["--oauth-flow", config["oauth_flow"]]
     return argv
 
 
@@ -1490,6 +1513,17 @@ def _bake_create(argv: list[str]) -> None:
     p.add_argument("--oauth-client-secret", default=None)
     p.add_argument("--oauth-scope", default=None)
     p.add_argument("--oauth-redirect-uri", default=None, metavar="URI")
+    p.add_argument(
+        "--oauth-flow",
+        choices=["auto", "authorization_code", "client_credentials"],
+        default="auto",
+        help=(
+            "OAuth flow to use. 'auto' (default) picks client_credentials when both "
+            "client-id and client-secret are provided, otherwise authorization_code. "
+            "Use 'authorization_code' to force the auth code + PKCE flow even with a "
+            "client secret (required for confidential-client servers like Slack)."
+        ),
+    )
     p.add_argument("--include", default="", help="Comma-separated include globs")
     p.add_argument("--exclude", default="", help="Comma-separated exclude globs")
     p.add_argument("--methods", default="", help="Comma-separated HTTP methods")
@@ -1544,6 +1578,7 @@ def _bake_create(argv: list[str]) -> None:
         "oauth_client_secret": args.oauth_client_secret,
         "oauth_scope": args.oauth_scope,
         "oauth_redirect_uri": args.oauth_redirect_uri,
+        "oauth_flow": args.oauth_flow,
         "include": [x.strip() for x in args.include.split(",") if x.strip()],
         "exclude": [x.strip() for x in args.exclude.split(",") if x.strip()],
         "methods": [x.strip().upper() for x in args.methods.split(",") if x.strip()],
@@ -3107,6 +3142,17 @@ def _build_main_parser() -> argparse.ArgumentParser:
         help="Full redirect URI for the OAuth callback (e.g. http://localhost:3334/oauth/callback). "
              "Overrides the default http://127.0.0.1:<random-port>/callback.",
     )
+    pre.add_argument(
+        "--oauth-flow",
+        choices=["auto", "authorization_code", "client_credentials"],
+        default="auto",
+        help=(
+            "OAuth flow to use. 'auto' (default) picks client_credentials when both "
+            "client-id and client-secret are provided, otherwise authorization_code. "
+            "Use 'authorization_code' to force the auth code + PKCE flow even with a "
+            "client secret (required for confidential-client servers like Slack)."
+        ),
+    )
     # Resource flags
     pre.add_argument(
         "--list-resources", action="store_true", help="List available resources"
@@ -3220,12 +3266,21 @@ def _setup_oauth(pre_args):
         if pre_args.oauth_client_secret
         else None
     )
+    flow = getattr(pre_args, "oauth_flow", "auto")
+    if flow == "client_credentials" and not (client_id and client_secret):
+        print(
+            "Error: --oauth-flow=client_credentials requires both "
+            "--oauth-client-id and --oauth-client-secret",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     return build_oauth_provider(
         server_url,
         client_id=client_id,
         client_secret=client_secret,
         scope=pre_args.oauth_scope,
         redirect_uri=pre_args.oauth_redirect_uri,
+        flow=flow,
     )
 
 

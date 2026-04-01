@@ -219,6 +219,66 @@ class TestBuildOAuthProvider:
         assert data.get("client_secret") is None
         assert data.get("token_endpoint_auth_method") == "none"
 
+    def test_flow_authorization_code_with_secret_returns_auth_code_provider(self, tmp_path, monkeypatch):
+        """flow='authorization_code' with both client_id and client_secret
+        must return OAuthClientProvider (not ClientCredentialsOAuthProvider)."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        from mcp.client.auth.oauth2 import OAuthClientProvider
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            client_id="my-id",
+            client_secret="my-secret",
+            scope="read write",
+            redirect_uri="http://localhost:19879/callback",
+            flow="authorization_code",
+        )
+        assert isinstance(provider, OAuthClientProvider)
+
+    def test_flow_authorization_code_preseeds_confidential_client(self, tmp_path, monkeypatch):
+        """flow='authorization_code' with client_secret pre-seeds storage with
+        client_secret_post auth method."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+
+        mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            client_id="slack-client-id",
+            client_secret="slack-client-secret",
+            redirect_uri="http://localhost:19880/callback",
+            flow="authorization_code",
+        )
+
+        storage = mcp2cli.FileTokenStorage("https://example.com/mcp")
+        assert storage._client_path.exists()
+        data = json.loads(storage._client_path.read_text())
+        assert data["client_id"] == "slack-client-id"
+        assert data["client_secret"] == "slack-client-secret"
+        assert data["token_endpoint_auth_method"] == "client_secret_post"
+
+    def test_flow_auto_with_id_and_secret_returns_client_credentials(self):
+        """flow='auto' (default) with both id+secret → client credentials."""
+        from mcp.client.auth.extensions.client_credentials import ClientCredentialsOAuthProvider
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            client_id="my-id",
+            client_secret="my-secret",
+            flow="auto",
+        )
+        assert isinstance(provider, ClientCredentialsOAuthProvider)
+
+    def test_flow_client_credentials_explicit(self):
+        """flow='client_credentials' explicit returns client credentials provider."""
+        from mcp.client.auth.extensions.client_credentials import ClientCredentialsOAuthProvider
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            client_id="my-id",
+            client_secret="my-secret",
+            flow="client_credentials",
+        )
+        assert isinstance(provider, ClientCredentialsOAuthProvider)
+
     def test_find_free_port(self):
         port = mcp2cli._find_free_port()
         assert isinstance(port, int)
@@ -272,6 +332,7 @@ class TestOAuthCLIValidation:
         assert "--oauth-client-secret" in r.stdout
         assert "--oauth-scope" in r.stdout
         assert "--oauth-redirect-uri" in r.stdout
+        assert "--oauth-flow" in r.stdout
 
     def test_env_secret_in_client_id(self):
         """--oauth-client-id env:VAR should resolve from environment."""
