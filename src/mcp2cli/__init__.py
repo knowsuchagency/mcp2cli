@@ -352,8 +352,56 @@ def _handle_http_error(resp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cache_key_for(source: str) -> str:
-    return hashlib.sha256(source.encode()).hexdigest()[:16]
+def cache_key_for(
+    source: str | None = None,
+    auth_headers: list[tuple[str, str]] | None = None,
+    transport: str | None = None,
+    env_vars: dict[str, str] | None = None,
+    config_dict: dict | None = None,
+) -> str:
+    """
+    Generate cache key from source URL and configuration parameters.
+    
+    This ensures unique caching for tools with the same URL but different
+    configurations (auth headers, transport, env vars, etc.).
+    
+    Args:
+        source: MCP server URL (legacy, prefer config_dict)
+        auth_headers: Authentication headers list (legacy, prefer config_dict)
+        transport: Transport type (legacy, prefer config_dict)
+        env_vars: Environment variables dict (legacy, prefer config_dict)
+        config_dict: Complete tool configuration dict (preferred, future-proof)
+    
+    Returns:
+        16-character hex hash uniquely identifying this configuration
+    """
+    # If config_dict is provided, use it directly (future-proof approach)
+    if config_dict is not None:
+        # Extract only fields that affect MCP server behavior
+        # Exclude fields like cache_ttl, description that don't affect tools
+        cache_config = {
+            k: v for k, v in config_dict.items()
+            if k not in ('cache_ttl', 'description', 'include', 'exclude', 'methods')
+        }
+        # Ensure auth_headers are sorted for stable hashing
+        if 'auth_headers' in cache_config and cache_config['auth_headers']:
+            cache_config['auth_headers'] = sorted(cache_config['auth_headers'])
+    else:
+        # Legacy: build from individual parameters
+        if source is None:
+            raise ValueError("Either source or config_dict must be provided")
+        cache_config = {
+            'source': source,
+            'auth_headers': sorted(auth_headers or []),
+            'transport': transport,
+            'env_vars': env_vars or {},
+        }
+    
+    # Create stable JSON representation
+    cache_input = json.dumps(cache_config, sort_keys=True)
+    
+    # Generate hash
+    return hashlib.sha256(cache_input.encode()).hexdigest()[:16]
 
 
 def load_cached(key: str, ttl: int) -> dict | None:
@@ -642,7 +690,10 @@ def load_openapi_spec(
     is_url = source.startswith("http://") or source.startswith("https://")
 
     if is_url:
-        key = cache_key or cache_key_for(source)
+        key = cache_key or cache_key_for(config_dict={
+            'source': source,
+            'auth_headers': auth_headers,
+        })
         if not refresh:
             cached = load_cached(key, ttl)
             if cached is not None:
@@ -1024,7 +1075,10 @@ def load_graphql_schema(
     oauth_provider: "httpx.Auth | None" = None,
 ) -> dict:
     """POST introspection query to a GraphQL endpoint, with caching."""
-    key = cache_key or cache_key_for(f"graphql:{url}")
+    key = cache_key or cache_key_for(config_dict={
+        'source': f"graphql:{url}",
+        'auth_headers': auth_headers,
+    })
     if not refresh:
         cached = load_cached(key, ttl)
         if cached is not None:
@@ -2775,7 +2829,16 @@ def handle_mcp(
     head: int | None = None,
     verbose: bool = False,
 ):
-    key = cache_key_override or cache_key_for(source)
+    # Build a config dict for cache key generation (future-proof)
+    config_for_cache = {
+        'source': source,
+        'auth_headers': auth_headers,
+        'transport': transport,
+        'env_vars': env_vars,
+        'is_stdio': is_stdio,
+    }
+    
+    key = cache_key_override or cache_key_for(config_dict=config_for_cache)
 
     # Resource/prompt operations skip the tool flow entirely
     if resource_action or prompt_action:
