@@ -658,7 +658,7 @@ def load_openapi_spec(
     is_url = source.startswith("http://") or source.startswith("https://")
 
     if is_url:
-        key = cache_key or cache_key_for(config_dict={
+        key = cache_key or cache_key_for({
             'source': source,
             'auth_headers': auth_headers,
         })
@@ -1043,7 +1043,7 @@ def load_graphql_schema(
     oauth_provider: "httpx.Auth | None" = None,
 ) -> dict:
     """POST introspection query to a GraphQL endpoint, with caching."""
-    key = cache_key or cache_key_for(config_dict={
+    key = cache_key or cache_key_for({
         'source': f"graphql:{url}",
         'auth_headers': auth_headers,
     })
@@ -2806,7 +2806,7 @@ def handle_mcp(
         'is_stdio': is_stdio,
     }
     
-    key = cache_key_override or cache_key_for(config_dict=config_for_cache)
+    key = cache_key_override or cache_key_for(config_for_cache)
 
     # Resource/prompt operations skip the tool flow entirely
     if resource_action or prompt_action:
