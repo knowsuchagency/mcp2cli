@@ -352,57 +352,25 @@ def _handle_http_error(resp) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cache_key_for(
-    source: str | None = None,
-    auth_headers: list[tuple[str, str]] | None = None,
-    transport: str | None = None,
-    env_vars: dict[str, str] | None = None,
-    config_dict: dict | None = None,
-) -> str:
+def cache_key_for(config: dict) -> str:
     """
-    Generate cache key from source URL and configuration parameters.
-    
-    This ensures unique caching for tools with the same URL but different
-    configurations (auth headers, transport, env vars, etc.).
-    
-    Args:
-        source: MCP server URL (legacy, prefer config_dict)
-        auth_headers: Authentication headers list (legacy, prefer config_dict)
-        transport: Transport type (legacy, prefer config_dict)
-        env_vars: Environment variables dict (legacy, prefer config_dict)
-        config_dict: Complete tool configuration dict (preferred, future-proof)
-    
-    Returns:
-        16-character hex hash uniquely identifying this configuration
-    """
-    # If config_dict is provided, use it directly (future-proof approach)
-    if config_dict is not None:
-        # Extract only fields that affect MCP server behavior
-        # Exclude fields like cache_ttl, description that don't affect tools
-        cache_config = {
-            k: v for k, v in config_dict.items()
-            if k not in ('cache_ttl', 'description', 'include', 'exclude', 'methods')
-        }
-        # Ensure auth_headers are sorted for stable hashing
-        if 'auth_headers' in cache_config and cache_config['auth_headers']:
-            cache_config['auth_headers'] = sorted(cache_config['auth_headers'])
-    else:
-        # Legacy: build from individual parameters
-        if source is None:
-            raise ValueError("Either source or config_dict must be provided")
-        cache_config = {
-            'source': source,
-            'auth_headers': sorted(auth_headers or []),
-            'transport': transport,
-            'env_vars': env_vars or {},
-        }
-    
-    # Create stable JSON representation
-    cache_input = json.dumps(cache_config, sort_keys=True)
-    
-    # Generate hash
-    return hashlib.sha256(cache_input.encode()).hexdigest()[:16]
+    Generate cache key from tool configuration dict.
 
+    Hashes all config fields that affect MCP server behavior to ensure
+    unique caching for tools with the same URL but different configurations.
+    """
+    # Exclude fields that don't affect which tools are returned
+    cache_config = {
+        k: v for k, v in config.items()
+        if k not in ('cache_ttl', 'description', 'include', 'exclude', 'methods')
+    }
+    # Ensure auth_headers are sorted for stable hashing
+    if 'auth_headers' in cache_config and cache_config['auth_headers']:
+        cache_config['auth_headers'] = sorted(cache_config['auth_headers'])
+
+    return hashlib.sha256(
+        json.dumps(cache_config, sort_keys=True).encode()
+    ).hexdigest()[:16]
 
 def load_cached(key: str, ttl: int) -> dict | None:
     path = CACHE_DIR / f"{key}.json"
