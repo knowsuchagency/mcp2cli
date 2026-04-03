@@ -559,6 +559,7 @@ def build_oauth_provider(
         redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     client_metadata = OAuthClientMetadata(
+        client_name="mcp2cli",
         redirect_uris=[redirect_uri],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
