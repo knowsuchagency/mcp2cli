@@ -481,6 +481,7 @@ def build_oauth_provider(
     *,
     client_id: str | None = None,
     client_secret: str | None = None,
+    client_name: str = "mcp2cli",
     scope: str | None = None,
     redirect_uri: str | None = None,
     flow: str = "auto",
@@ -559,7 +560,7 @@ def build_oauth_provider(
         redirect_uri = f"http://127.0.0.1:{port}/callback"
 
     client_metadata = OAuthClientMetadata(
-        client_name="mcp2cli",
+        client_name=client_name,
         redirect_uris=[redirect_uri],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],
@@ -1482,6 +1483,8 @@ def _baked_to_argv(config: dict) -> list[str]:
         argv += ["--oauth-client-id", config["oauth_client_id"]]
     if config.get("oauth_client_secret"):
         argv += ["--oauth-client-secret", config["oauth_client_secret"]]
+    if config.get("oauth_client_name") and config["oauth_client_name"] != "mcp2cli":
+        argv += ["--oauth-client-name", config["oauth_client_name"]]
     if config.get("oauth_scope"):
         argv += ["--oauth-scope", config["oauth_scope"]]
     if config.get("oauth_redirect_uri"):
@@ -1534,6 +1537,7 @@ def _bake_create(argv: list[str]) -> None:
     p.add_argument("--oauth", action="store_true")
     p.add_argument("--oauth-client-id", default=None)
     p.add_argument("--oauth-client-secret", default=None)
+    p.add_argument("--oauth-client-name", default="mcp2cli")
     p.add_argument("--oauth-scope", default=None)
     p.add_argument("--oauth-redirect-uri", default=None, metavar="URI")
     p.add_argument(
@@ -1599,6 +1603,7 @@ def _bake_create(argv: list[str]) -> None:
         "oauth": args.oauth,
         "oauth_client_id": args.oauth_client_id,
         "oauth_client_secret": args.oauth_client_secret,
+        "oauth_client_name": args.oauth_client_name,
         "oauth_scope": args.oauth_scope,
         "oauth_redirect_uri": args.oauth_redirect_uri,
         "oauth_flow": args.oauth_flow,
@@ -3163,6 +3168,12 @@ def _build_main_parser() -> argparse.ArgumentParser:
         help="OAuth client secret — supports env:VAR and file:/path prefixes",
     )
     pre.add_argument(
+        "--oauth-client-name",
+        default="mcp2cli",
+        help="Client name sent during OAuth Dynamic Client Registration (default: mcp2cli). "
+             "Some servers require a specific client name for DCR to succeed.",
+    )
+    pre.add_argument(
         "--oauth-scope",
         default=None,
         help="OAuth scope(s) to request",
@@ -3310,6 +3321,7 @@ def _setup_oauth(pre_args):
         server_url,
         client_id=client_id,
         client_secret=client_secret,
+        client_name=getattr(pre_args, "oauth_client_name", "mcp2cli"),
         scope=pre_args.oauth_scope,
         redirect_uri=pre_args.oauth_redirect_uri,
         flow=flow,
