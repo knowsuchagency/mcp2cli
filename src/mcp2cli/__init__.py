@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 import argparse
 import copy
@@ -1620,9 +1620,17 @@ _BAKE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 def _handle_bake(argv: list[str]) -> None:
     """Dispatch bake subcommands."""
-    if not argv:
-        print("Usage: mcp2cli bake <create|list|show|remove|update|install> ...")
-        sys.exit(1)
+    if not argv or argv[0] in ("-h", "--help"):
+        print("Usage: mcp2cli bake <command> [options]\n")
+        print("Commands:")
+        print("  create    Save connection settings as a named baked tool")
+        print("  list      List all baked tools")
+        print("  show      Show config for a baked tool (secrets masked)")
+        print("  remove    Delete a baked tool")
+        print("  update    Update settings on an existing baked tool")
+        print("  install   Create a ~/.local/bin wrapper script")
+        print("\nRun 'mcp2cli bake <command> --help' for command-specific help.")
+        sys.exit(0 if argv else 1)
     sub = argv[0]
     rest = argv[1:]
     dispatch = {
@@ -3275,7 +3283,19 @@ def main():
 
 def _build_main_parser() -> argparse.ArgumentParser:
     """Build the global ArgumentParser for _main_impl."""
-    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre = argparse.ArgumentParser(
+        add_help=False,
+        allow_abbrev=False,
+        epilog=(
+            "subcommands:\n"
+            "  bake                Manage baked tool configurations\n"
+            "                      (create, list, show, remove, update, install)\n"
+            "  @<name>             Run a previously baked tool\n"
+            "\n"
+            "Run 'mcp2cli bake --help' for bake subcommand details."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     pre.add_argument("--spec", default=None, help="OpenAPI spec URL or file path")
     pre.add_argument("--mcp", default=None, help="MCP server URL (HTTP/SSE)")
     pre.add_argument("--mcp-stdio", default=None, help="MCP server command (stdio)")
