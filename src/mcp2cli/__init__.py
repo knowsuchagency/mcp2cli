@@ -448,16 +448,19 @@ def sort_commands(
     if not usage:
         return commands  # no data, keep insertion order
 
+    def _usage_key(c: "CommandDef") -> str:
+        return c.tool_name or c.graphql_field_name or c.name
+
     if sort_mode == "usage":
         return sorted(
             commands,
-            key=lambda c: usage.get(c.tool_name or c.name, {}).get("count", 0),
+            key=lambda c: usage.get(_usage_key(c), {}).get("count", 0),
             reverse=True,
         )
     if sort_mode == "recent":
         return sorted(
             commands,
-            key=lambda c: usage.get(c.tool_name or c.name, {}).get("last_used", ""),
+            key=lambda c: usage.get(_usage_key(c), {}).get("last_used", ""),
             reverse=True,
         )
     return commands
@@ -3818,7 +3821,7 @@ def _handle_openapi_mode(
     )
 
     # Record usage after successful execution
-    record_usage(src_hash, cmd.name)
+    record_usage(src_hash, cmd.tool_name or cmd.graphql_field_name or cmd.name)
 
 
 def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
