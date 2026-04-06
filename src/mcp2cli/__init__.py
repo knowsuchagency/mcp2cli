@@ -26,6 +26,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from datetime import datetime, timezone
+
 import anyio
 import httpx
 
@@ -33,6 +35,7 @@ CACHE_DIR = Path(
     os.environ.get("MCP2CLI_CACHE_DIR", Path.home() / ".cache" / "mcp2cli")
 )
 DEFAULT_CACHE_TTL = 3600
+USAGE_FILE = CACHE_DIR / "usage.json"
 CONFIG_DIR = Path(
     os.environ.get("MCP2CLI_CONFIG_DIR", Path.home() / ".config" / "mcp2cli")
 )
@@ -385,6 +388,91 @@ def load_cached(key: str, ttl: int) -> dict | None:
 def save_cache(key: str, data: dict):
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     (CACHE_DIR / f"{key}.json").write_text(json.dumps(data))
+
+
+# ---------------------------------------------------------------------------
+# Usage tracking
+# ---------------------------------------------------------------------------
+
+
+def _load_usage() -> dict:
+    """Load the usage tracking file. Returns empty dict on any failure."""
+    if not USAGE_FILE.exists():
+        return {}
+    try:
+        return json.loads(USAGE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_usage(data: dict) -> None:
+    """Write usage data. Last-write-wins -- no file locking."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    USAGE_FILE.write_text(json.dumps(data, indent=2))
+
+
+def record_usage(source_hash: str, tool_name: str) -> None:
+    """Increment the call count and update last_used for a tool."""
+    usage = _load_usage()
+    bucket = usage.setdefault(source_hash, {})
+    entry = bucket.setdefault(tool_name, {"count": 0, "last_used": ""})
+    entry["count"] += 1
+    entry["last_used"] = datetime.now(timezone.utc).isoformat()
+    _save_usage(usage)
+
+
+def _source_hash_for(source: str) -> str:
+    """Derive a stable hash key from a source URL/command string."""
+    return hashlib.sha256(source.encode()).hexdigest()[:16]
+
+
+def sort_commands(
+    commands: list["CommandDef"],
+    sort_mode: str,
+    source_hash: str,
+) -> list["CommandDef"]:
+    """Sort commands by the given mode using usage data.
+
+    Modes:
+        usage   -- most-called first (default when usage data exists)
+        recent  -- most-recently-used first
+        alpha   -- alphabetical by name
+        default -- original insertion order
+    """
+    if sort_mode == "default":
+        return commands
+    if sort_mode == "alpha":
+        return sorted(commands, key=lambda c: c.name)
+
+    usage = _load_usage().get(source_hash, {})
+    if not usage:
+        return commands  # no data, keep insertion order
+
+    if sort_mode == "usage":
+        return sorted(
+            commands,
+            key=lambda c: usage.get(c.tool_name or c.name, {}).get("count", 0),
+            reverse=True,
+        )
+    if sort_mode == "recent":
+        return sorted(
+            commands,
+            key=lambda c: usage.get(c.tool_name or c.name, {}).get("last_used", ""),
+            reverse=True,
+        )
+    return commands
+
+
+def _resolve_sort_mode(explicit_sort: str | None, source_hash: str) -> str:
+    """Determine the effective sort mode.
+
+    If the user passed --sort explicitly, use that. Otherwise, default to
+    'usage' when usage data exists for this source, else 'default'.
+    """
+    if explicit_sort is not None:
+        return explicit_sort
+    usage = _load_usage().get(source_hash, {})
+    return "usage" if usage else "default"
 
 
 # ---------------------------------------------------------------------------
@@ -1225,8 +1313,20 @@ def _wrap_description(description: str, indent: int, total_width: int = 110) -> 
     )
 
 
-def list_graphql_commands(commands: list[CommandDef], verbose: bool = False):
+def list_graphql_commands(
+    commands: list[CommandDef],
+    verbose: bool = False,
+    compact: bool = False,
+    source_hash: str = "",
+    sort_mode: str | None = None,
+    top: int | None = None,
+):
     """Group commands by operation type and print."""
+    commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if compact:
+        print(" ".join(cmd.name for cmd in commands))
+        return
 
     groups: dict[str, list[CommandDef]] = {}
     for cmd in commands:
@@ -1364,19 +1464,30 @@ def handle_graphql(
     jq_expr: str | None = None,
     head: int | None = None,
     verbose: bool = False,
+    sort_mode: str | None = None,
+    top: int | None = None,
+    compact: bool = False,
 ):
     """Top-level handler for --graphql mode."""
+    src_hash = _source_hash_for(url)
     schema = load_graphql_schema(url, auth_headers, cache_key, ttl, refresh, oauth_provider=oauth_provider)
     commands = extract_graphql_commands(schema)
 
+    list_kwargs = dict(
+        verbose=verbose, compact=compact,
+        source_hash=src_hash, sort_mode=sort_mode, top=top,
+    )
+
     if list_mode:
-        list_graphql_commands(commands, verbose=verbose)
+        list_graphql_commands(commands, **list_kwargs)
         return
 
     if not remaining:
-        print("Available operations:")
-        list_graphql_commands(commands, verbose=verbose)
-        print("\nUse --list for the same output, or provide a subcommand.")
+        if not compact:
+            print("Available operations:")
+        list_graphql_commands(commands, **list_kwargs)
+        if not compact:
+            print("\nUse --list for the same output, or provide a subcommand.")
         return
 
     pre_for_gql = argparse.ArgumentParser(add_help=False)
@@ -1393,6 +1504,9 @@ def handle_graphql(
         fields_override=fields_override, oauth_provider=oauth_provider,
         jq_expr=jq_expr, head=head,
     )
+
+    # Record usage after successful execution
+    record_usage(src_hash, cmd.graphql_field_name or cmd.name)
 
 
 # ---------------------------------------------------------------------------
@@ -1812,7 +1926,34 @@ def build_argparse(
 # ---------------------------------------------------------------------------
 
 
-def list_openapi_commands(commands: list[CommandDef], verbose: bool = False):
+def _apply_list_options(
+    commands: list[CommandDef],
+    source_hash: str = "",
+    sort_mode: str | None = None,
+    top: int | None = None,
+) -> list[CommandDef]:
+    """Apply sort and top-N filtering to a command list."""
+    effective_sort = _resolve_sort_mode(sort_mode, source_hash)
+    commands = sort_commands(commands, effective_sort, source_hash)
+    if top is not None:
+        commands = commands[:top]
+    return commands
+
+
+def list_openapi_commands(
+    commands: list[CommandDef],
+    verbose: bool = False,
+    compact: bool = False,
+    source_hash: str = "",
+    sort_mode: str | None = None,
+    top: int | None = None,
+):
+    commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if compact:
+        print(" ".join(cmd.name for cmd in commands))
+        return
+
     groups: dict[str, list[CommandDef]] = {}
     for cmd in commands:
         prefix = cmd.name.split("-", 1)[0] if "-" in cmd.name else "other"
@@ -1832,7 +1973,20 @@ def list_openapi_commands(commands: list[CommandDef], verbose: bool = False):
             print(line)
 
 
-def list_mcp_commands(commands: list[CommandDef], verbose: bool = False):
+def list_mcp_commands(
+    commands: list[CommandDef],
+    verbose: bool = False,
+    compact: bool = False,
+    source_hash: str = "",
+    sort_mode: str | None = None,
+    top: int | None = None,
+):
+    commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if compact:
+        print(" ".join(cmd.name for cmd in commands))
+        return
+
     for cmd in commands:
         if cmd.description:
             if verbose:
@@ -2022,6 +2176,10 @@ def run_mcp_http(
     jq_expr: str | None = None,
     head: int | None = None,
     verbose: bool = False,
+    sort_mode: str | None = None,
+    top: int | None = None,
+    compact: bool = False,
+    source_hash: str = "",
 ):
     extra = dict(
         resource_action=resource_action,
@@ -2033,6 +2191,10 @@ def run_mcp_http(
         jq_expr=jq_expr,
         head=head,
         verbose=verbose,
+        sort_mode=sort_mode,
+        top=top,
+        compact=compact,
+        source_hash=source_hash,
     )
 
     async def _run():
@@ -2119,6 +2281,10 @@ def run_mcp_stdio(
     jq_expr: str | None = None,
     head: int | None = None,
     verbose: bool = False,
+    sort_mode: str | None = None,
+    top: int | None = None,
+    compact: bool = False,
+    source_hash: str = "",
 ):
     extra = dict(
         resource_action=resource_action,
@@ -2130,6 +2296,10 @@ def run_mcp_stdio(
         jq_expr=jq_expr,
         head=head,
         verbose=verbose,
+        sort_mode=sort_mode,
+        top=top,
+        compact=compact,
+        source_hash=source_hash,
     )
 
     import anyio
@@ -2182,6 +2352,10 @@ async def _mcp_session(
     jq_expr: str | None = None,
     head: int | None = None,
     verbose: bool = False,
+    sort_mode: str | None = None,
+    top: int | None = None,
+    compact: bool = False,
+    source_hash: str = "",
 ):
     # Handle resource operations
     if resource_action:
@@ -2199,6 +2373,11 @@ async def _mcp_session(
         )
         return
 
+    list_kwargs = dict(
+        verbose=verbose, compact=compact,
+        source_hash=source_hash, sort_mode=sort_mode, top=top,
+    )
+
     if list_mode:
         result = await session.list_tools()
         tools = [
@@ -2215,10 +2394,12 @@ async def _mcp_session(
             if not commands:
                 print(f"\nNo tools matching '{search_pattern}'.")
                 return
-            print(f"\nTools matching '{search_pattern}':")
+            if not compact:
+                print(f"\nTools matching '{search_pattern}':")
         else:
-            print("\nAvailable tools:")
-        list_mcp_commands(commands, verbose=verbose)
+            if not compact:
+                print("\nAvailable tools:")
+        list_mcp_commands(commands, **list_kwargs)
         return
 
     if tool_name is None:
@@ -2837,6 +3018,9 @@ def handle_mcp(
     jq_expr: str | None = None,
     head: int | None = None,
     verbose: bool = False,
+    sort_mode: str | None = None,
+    top: int | None = None,
+    compact: bool = False,
 ):
     # Build a config dict for cache key generation (future-proof)
     config_for_cache = {
@@ -2846,8 +3030,9 @@ def handle_mcp(
         'env_vars': env_vars,
         'is_stdio': is_stdio,
     }
-    
+
     key = cache_key_override or cache_key_for(config_for_cache)
+    src_hash = _source_hash_for(source)
 
     # Resource/prompt operations skip the tool flow entirely
     if resource_action or prompt_action:
@@ -2868,9 +3053,14 @@ def handle_mcp(
         )
         return
 
+    list_kwargs = dict(
+        verbose=verbose, compact=compact,
+        source_hash=src_hash, sort_mode=sort_mode, top=top,
+    )
+
     if list_mode:
         if bake_config and (bake_config.include or bake_config.exclude or bake_config.methods):
-            # Fetch tools, filter, then list — don't delegate to unfiltered path
+            # Fetch tools, filter, then list -- don't delegate to unfiltered path
             tools = _fetch_or_cache_mcp_tools(
                 key, ttl, refresh, source, is_stdio, auth_headers, env_vars,
                 transport=transport, oauth_provider=oauth_provider,
@@ -2879,8 +3069,9 @@ def handle_mcp(
             commands = filter_commands(
                 commands, bake_config.include, bake_config.exclude, bake_config.methods,
             )
-            print("\nAvailable tools:")
-            list_mcp_commands(commands, verbose=verbose)
+            if not compact:
+                print("\nAvailable tools:")
+            list_mcp_commands(commands, **list_kwargs)
             return
         _dispatch_mcp_call(
             source, is_stdio, auth_headers, env_vars,
@@ -2889,6 +3080,8 @@ def handle_mcp(
             search_pattern=search_pattern,
             jq_expr=jq_expr, head=head,
             verbose=verbose,
+            sort_mode=sort_mode, top=top, compact=compact,
+            source_hash=src_hash,
         )
         return
 
@@ -2905,9 +3098,11 @@ def handle_mcp(
         )
 
     if not remaining:
-        print("Available tools:")
-        list_mcp_commands(commands, verbose=verbose)
-        print("\nUse --list for the same output, or provide a subcommand.")
+        if not compact:
+            print("Available tools:")
+        list_mcp_commands(commands, **list_kwargs)
+        if not compact:
+            print("\nUse --list for the same output, or provide a subcommand.")
         return
 
     pre = argparse.ArgumentParser(add_help=False)
@@ -2935,6 +3130,9 @@ def handle_mcp(
         toon=toon, transport=transport, oauth_provider=oauth_provider,
         jq_expr=jq_expr, head=head,
     )
+
+    # Record usage after successful execution
+    record_usage(src_hash, cmd.tool_name or cmd.name)
 
 
 def _fetch_mcp_tools(
@@ -3109,6 +3307,30 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="verbose",
         help="Show full tool descriptions in --list output, wrapped to terminal width (default: truncated with ...)",
+    )
+    pre.add_argument(
+        "--sort",
+        choices=["usage", "recent", "alpha", "default"],
+        default=None,
+        dest="sort_mode",
+        help=(
+            "Sort order for --list output. 'usage' sorts by call frequency, "
+            "'recent' by last-used time, 'alpha' alphabetically, 'default' keeps "
+            "insertion order. When omitted, defaults to 'usage' if usage data "
+            "exists, otherwise 'default'."
+        ),
+    )
+    pre.add_argument(
+        "--top",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Show only the top N tools in --list output (useful for LLM agents)",
+    )
+    pre.add_argument(
+        "--compact",
+        action="store_true",
+        help="Space-separated tool names only, no descriptions (~2 tokens/tool)",
     )
     pre.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     pre.add_argument("--raw", action="store_true", help="Print raw response body")
@@ -3521,6 +3743,7 @@ def _handle_openapi_mode(
     oauth_provider: "httpx.Auth | None" = None,
 ) -> None:
     """Execute OpenAPI mode: load spec, build parser, execute."""
+    src_hash = _source_hash_for(pre_args.spec)
     spec = load_openapi_spec(
         pre_args.spec,
         auth_headers,
@@ -3535,14 +3758,20 @@ def _handle_openapi_mode(
             commands, bake_config.include, bake_config.exclude, bake_config.methods,
         )
 
+    list_kwargs = dict(
+        verbose=pre_args.verbose, compact=pre_args.compact,
+        source_hash=src_hash, sort_mode=pre_args.sort_mode, top=pre_args.top,
+    )
+
     if pre_args.list_commands:
         if search_pattern:
             commands = _filter_commands(commands, search_pattern)
             if not commands:
                 print(f"\nNo tools matching '{search_pattern}'.")
                 return
-            print(f"\nTools matching '{search_pattern}':")
-        list_openapi_commands(commands, verbose=pre_args.verbose)
+            if not pre_args.compact:
+                print(f"\nTools matching '{search_pattern}':")
+        list_openapi_commands(commands, **list_kwargs)
         return
 
     if not remaining:
@@ -3587,6 +3816,9 @@ def _handle_openapi_mode(
         oauth_provider=oauth_provider,
         jq_expr=pre_args.jq, head=pre_args.head,
     )
+
+    # Record usage after successful execution
+    record_usage(src_hash, cmd.name)
 
 
 def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
@@ -3645,6 +3877,9 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             jq_expr=pre_args.jq,
             head=pre_args.head,
             verbose=pre_args.verbose,
+            sort_mode=pre_args.sort_mode,
+            top=pre_args.top,
+            compact=pre_args.compact,
         )
         return
 
@@ -3677,6 +3912,9 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             jq_expr=pre_args.jq,
             head=pre_args.head,
             verbose=pre_args.verbose,
+            sort_mode=pre_args.sort_mode,
+            top=pre_args.top,
+            compact=pre_args.compact,
         )
         return
 
