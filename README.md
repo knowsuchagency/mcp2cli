@@ -197,6 +197,26 @@ Filtering options:
 
 Configs are stored in `~/.config/mcp2cli/baked.json`. Override with `MCP2CLI_CONFIG_DIR`.
 
+### Usage-aware tool ranking
+
+mcp2cli tracks tool invocations locally and uses that data to rank `--list` output, reducing token costs for LLM agents working with large servers.
+
+```bash
+# Default --list: ~1,400 tokens for 96 tools
+mcp2cli @myapi --list
+
+# Top 10 most-used tools, names only: ~20 tokens
+mcp2cli @myapi --list --top 10 --compact
+
+# Sort by most recently used
+mcp2cli @myapi --list --sort recent
+
+# Alphabetical sort
+mcp2cli @myapi --list --sort alpha
+```
+
+When usage data exists for a source, `--list` defaults to sorting by call frequency. Otherwise insertion order is preserved. Usage data is stored in `~/.cache/mcp2cli/usage.json`.
+
 ### Output control
 
 ```bash
@@ -267,6 +287,10 @@ Options:
   --refresh               Bypass cache
   --list                  List available subcommands
   --search PATTERN        Search tools by name or description (implies --list)
+  --sort MODE             Sort --list output: usage|recent|alpha|default
+  --top N                 Show only the top N tools in --list output
+  --compact               Space-separated tool names only, no descriptions
+  --verbose               Show full tool descriptions (unwrapped)
   --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
