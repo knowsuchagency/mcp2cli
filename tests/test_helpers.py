@@ -8,8 +8,8 @@ from mcp2cli import (
     ParamDef,
     CommandDef,
     _apply_head,
+    _collect_openapi_params,
     _find_toon_cli,
-    _run_jq,
     _split_at_subcommand,
     _toon_encode,
     cache_key_for,
@@ -114,6 +114,22 @@ class TestCoerceValue:
     def test_non_array_unaffected(self):
         assert coerce_value("hello", {"type": "string"}) == "hello"
 
+    def test_schemaless_json_object(self):
+        """JSON object string is parsed when schema has no type."""
+        assert coerce_value('{"key": "val"}', {}) == {"key": "val"}
+
+    def test_schemaless_json_array(self):
+        """JSON array string is parsed when schema has no type."""
+        assert coerce_value('[1, 2, 3]', {}) == [1, 2, 3]
+
+    def test_schemaless_plain_string(self):
+        """Plain string stays a string when schema has no type."""
+        assert coerce_value("hello", {}) == "hello"
+
+    def test_schemaless_invalid_json(self):
+        """String that looks like JSON but isn't stays as string."""
+        assert coerce_value("{not valid json", {}) == "{not valid json"
+
 
 class TestToKebab:
     def test_camel_case(self):
@@ -174,32 +190,6 @@ class TestOutputResult:
         assert '"a": 1' in captured.out  # fell back to JSON
         assert "TOON CLI" in captured.err  # printed warning
 
-    def test_jq_filters_dict(self, capsys, monkeypatch):
-        """--jq filters JSON output through jq."""
-        monkeypatch.setattr("mcp2cli._run_jq", lambda json_str, expr: '"Alice"\n')
-        output_result({"name": "Alice", "age": 30}, jq_expr=".name")
-        assert capsys.readouterr().out.strip() == '"Alice"'
-
-    def test_jq_filters_list(self, capsys, monkeypatch):
-        monkeypatch.setattr("mcp2cli._run_jq", lambda json_str, expr: "2\n")
-        output_result([{"a": 1}, {"a": 2}], jq_expr="length")
-        assert capsys.readouterr().out.strip() == "2"
-
-    def test_jq_skipped_for_raw(self, capsys, monkeypatch):
-        """--raw takes priority over --jq."""
-        called = []
-        monkeypatch.setattr("mcp2cli._run_jq", lambda *a: called.append(1) or "x")
-        output_result({"a": 1}, raw=True, jq_expr=".a")
-        assert not called
-
-    def test_jq_non_json_string_passthrough(self, capsys, monkeypatch):
-        """Non-JSON strings bypass jq processing."""
-        called = []
-        monkeypatch.setattr("mcp2cli._run_jq", lambda *a: called.append(1) or "x")
-        output_result("plain text", jq_expr=".a")
-        assert capsys.readouterr().out.strip() == "plain text"
-        assert not called
-
     def test_head_truncates_list(self, capsys):
         output_result([{"a": 1}, {"a": 2}, {"a": 3}], head=2, pretty=True)
         out = json.loads(capsys.readouterr().out)
@@ -210,39 +200,6 @@ class TestOutputResult:
         output_result({"a": 1, "b": 2}, head=1, pretty=True)
         out = json.loads(capsys.readouterr().out)
         assert out == {"a": 1, "b": 2}
-
-    def test_head_before_jq(self, capsys, monkeypatch):
-        """--head truncates before --jq processes."""
-        def mock_jq(json_str, expr):
-            data = json.loads(json_str)
-            return f"{len(data)}\n"
-        monkeypatch.setattr("mcp2cli._run_jq", mock_jq)
-        output_result([1, 2, 3, 4, 5], head=2, jq_expr="length")
-        assert capsys.readouterr().out.strip() == "2"
-
-
-class TestRunJq:
-    def test_basic_filter(self):
-        if not shutil.which("jq"):
-            import pytest
-            pytest.skip("jq not available")
-        result = _run_jq('{"name": "Alice"}', ".name")
-        assert result.strip() == '"Alice"'
-
-    def test_jq_not_found(self, monkeypatch):
-        import pytest
-        monkeypatch.setattr(shutil, "which", lambda cmd: None)
-        with pytest.raises(SystemExit):
-            _run_jq("{}", ".")
-
-    def test_invalid_expression(self):
-        if not shutil.which("jq"):
-            import pytest
-            pytest.skip("jq not available")
-        import pytest
-        with pytest.raises(SystemExit):
-            _run_jq('{"a": 1}', ".invalid[")
-
 
 class TestApplyHead:
     def test_list_truncation(self):
@@ -335,14 +292,20 @@ class TestCaching:
         assert load_cached("nonexistent", 3600) is None
 
     def test_cache_key_deterministic(self):
-        k1 = cache_key_for("https://example.com/spec.json")
-        k2 = cache_key_for("https://example.com/spec.json")
+        config = {"url": "https://example.com/spec.json"}
+        k1 = cache_key_for(config)
+        k2 = cache_key_for(config)
         assert k1 == k2
 
     def test_cache_key_different(self):
-        k1 = cache_key_for("https://example.com/a.json")
-        k2 = cache_key_for("https://example.com/b.json")
+        k1 = cache_key_for({"url": "https://example.com/a.json"})
+        k2 = cache_key_for({"url": "https://example.com/b.json"})
         assert k1 != k2
+
+    def test_cache_key_ignores_excluded_fields(self):
+        k1 = cache_key_for({"url": "https://example.com/spec.json", "cache_ttl": 60})
+        k2 = cache_key_for({"url": "https://example.com/spec.json", "cache_ttl": 3600})
+        assert k1 == k2
 
 
 class TestResolveRefs:
@@ -411,6 +374,19 @@ class TestExtractOpenAPICommands:
         list_pets = next(c for c in cmds if c.name == "list-pets")
         status_param = next(p for p in list_pets.params if p.name == "status")
         assert status_param.choices == ["available", "pending", "sold"]
+
+    def test_schema_preserved_on_params(self, petstore_spec):
+        """Extracted OpenAPI commands preserve schema on ParamDef."""
+        cmds = extract_openapi_commands(petstore_spec)
+        create = next(c for c in cmds if c.name == "create-pet")
+        name_param = next(p for p in create.params if p.original_name == "name")
+        assert name_param.schema.get("type") == "string"
+        age_param = next(p for p in create.params if p.original_name == "age")
+        assert age_param.schema.get("type") == "integer"
+        # Query param schema
+        list_pets = next(c for c in cmds if c.name == "list-pets")
+        limit_param = next(p for p in list_pets.params if p.original_name == "limit")
+        assert limit_param.schema.get("type") == "integer"
 
 
 class TestExtractMCPCommands:
@@ -528,16 +504,6 @@ class TestSplitAtSubcommand:
         assert g == ["--mcp", "http://s"]
         assert t == ["deploy", "--env", "production"]
 
-    def test_jq_value_not_treated_as_subcommand(self):
-        """--jq's expression value should not be mistaken for a subcommand."""
-        pre = self._pre()
-        pre.add_argument("--jq", default=None)
-        g, t = _split_at_subcommand(
-            ["--mcp", "http://s", "--jq", ".name", "my-tool"], pre
-        )
-        assert g == ["--mcp", "http://s", "--jq", ".name"]
-        assert t == ["my-tool"]
-
     def test_head_value_not_treated_as_subcommand(self):
         """--head's numeric value should not be mistaken for a subcommand."""
         pre = self._pre()
@@ -547,3 +513,99 @@ class TestSplitAtSubcommand:
         )
         assert g == ["--mcp", "http://s", "--head", "5"]
         assert t == ["my-tool"]
+
+
+class TestCollectOpenAPIParams:
+    def test_body_params_coerced_object(self):
+        """Body params with object schema get JSON-parsed."""
+        cmd = CommandDef(
+            name="create-item",
+            method="post",
+            path="/items",
+            has_body=True,
+            params=[
+                ParamDef(
+                    name="metadata",
+                    original_name="metadata",
+                    python_type=str,
+                    location="body",
+                    schema={"type": "object"},
+                ),
+                ParamDef(
+                    name="count",
+                    original_name="count",
+                    python_type=str,
+                    location="body",
+                    schema={"type": "integer"},
+                ),
+            ],
+        )
+        args = argparse.Namespace(
+            metadata='{"key": "val"}',
+            count="42",
+            stdin=False,
+        )
+        _, _, _, body, _ = _collect_openapi_params(cmd, args)
+        assert body == {"metadata": {"key": "val"}, "count": 42}
+
+    def test_body_params_coerced_array(self):
+        """Body params with array schema get JSON-parsed."""
+        cmd = CommandDef(
+            name="create-item",
+            method="post",
+            path="/items",
+            has_body=True,
+            params=[
+                ParamDef(
+                    name="tags",
+                    original_name="tags",
+                    python_type=str,
+                    location="body",
+                    schema={"type": "array"},
+                ),
+            ],
+        )
+        args = argparse.Namespace(tags='["a","b"]', stdin=False)
+        _, _, _, body, _ = _collect_openapi_params(cmd, args)
+        assert body == {"tags": ["a", "b"]}
+
+    def test_query_params_coerced(self):
+        """Query params get coerced (e.g., integer)."""
+        cmd = CommandDef(
+            name="list-items",
+            method="get",
+            path="/items",
+            params=[
+                ParamDef(
+                    name="limit",
+                    original_name="limit",
+                    python_type=int,
+                    location="query",
+                    schema={"type": "integer"},
+                ),
+            ],
+        )
+        args = argparse.Namespace(limit="10")
+        _, query, _, _, _ = _collect_openapi_params(cmd, args)
+        assert query == {"limit": 10}
+
+    def test_body_schemaless_json_object(self):
+        """Body params without schema type still parse JSON objects."""
+        cmd = CommandDef(
+            name="run-script",
+            method="post",
+            path="/run",
+            has_body=True,
+            params=[
+                ParamDef(
+                    name="args",
+                    original_name="args",
+                    python_type=str,
+                    location="body",
+                    schema={},
+                ),
+            ],
+        )
+        args = argparse.Namespace(args='{"key": "value"}', stdin=False)
+        _, _, _, body, _ = _collect_openapi_params(cmd, args)
+        assert body == {"args": {"key": "value"}}

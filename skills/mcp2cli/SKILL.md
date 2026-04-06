@@ -73,7 +73,6 @@ Options:
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
   --toon                  Encode output as TOON (token-efficient for LLMs)
-  --jq EXPR               Filter JSON output through jq expression
   --head N                Limit output to first N records (arrays)
   --version               Show version
 
@@ -236,32 +235,11 @@ mcp2cli --mcp https://mcp.example.com/sse --toon list-tags
 
 Best for large uniform arrays — 40-60% fewer tokens than JSON.
 
-### JSON filtering with --jq
-
-Prefer `--jq` over Python scripts for JSON processing — it uses fewer tokens and avoids script overhead.
-
-```bash
-# Extract specific fields
-mcp2cli --spec ./spec.json list-pets --jq '.[].name'
-
-# Count results
-mcp2cli --mcp https://example.com/sse list-items --jq 'length'
-
-# Complex filtering
-mcp2cli --spec ./spec.json list-pets --jq '[.[] | select(.status == "available")] | length'
-
-# Preview large datasets (--head truncates before --jq processes)
-mcp2cli --spec ./spec.json list-records --head 3 --jq '.'
-```
-
 ### Truncating large responses with --head
 
 ```bash
 # Preview first 3 records from a potentially huge dataset
 mcp2cli --spec ./spec.json list-records --head 3 --pretty
-
-# Combine with --jq for targeted inspection
-mcp2cli --spec ./spec.json list-records --head 1 --jq 'keys'
 ```
 
 `--head N` slices JSON arrays to the first N elements. Useful for datasets with oversized fields (e.g. geo_shape polygons at ~200KB per record).
@@ -340,21 +318,20 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
 
    **Anti-Patterns & Gotchas** — document every surprise found during testing:
    - Date syntax quirks (e.g. `date'2022'` vs `"2022"`)
-   - Fields that produce oversized output (e.g. geo_shape → use `--head` or `--jq` to exclude)
+   - Fields that produce oversized output (e.g. geo_shape → use `--head` to limit)
    - Parameter name inconsistencies across endpoints
    - Scope/filtering confusion (e.g. dataset contains national data, not just regional)
    - Binary export corruption risks (e.g. don't pipe binary formats through text encoding)
 
-   **Output Processing** — recommend `--jq` over Python for JSON filtering:
+   **Output Processing** — use `--pretty` for readable JSON, `--head` to limit results, or pipe to `jq` for filtering:
    ```bash
-   # Extract specific fields
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq '.[].name'
-   # Count results
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq 'length'
-   # Filter by condition
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --jq '[.[] | select(.status == "active")]'
+   # Pretty-print results
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --pretty
+   # Limit large datasets
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --head 5
+   # Filter with jq (pipe)
+   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records | jq '.[].name'
    ```
-   Prefer `--jq` over piping to Python for JSON processing — it is more token-efficient and avoids unnecessary script complexity.
 
    **Export Formats** (if the API supports multiple output types):
    - List supported formats (JSON, CSV, xlsx, parquet, etc.)
