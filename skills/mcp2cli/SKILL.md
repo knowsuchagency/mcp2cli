@@ -303,11 +303,11 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    **Core Workflow** (discovery + execution):
    ```bash
    # List available commands
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi --list
+   ${CLAUDE_SKILL_DIR}/scripts/myapi --list
    # Get help for a command
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --help
+   ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --help
    # Run a command
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --param value --pretty
+   ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --param value --pretty
    ```
 
    **Before Querying** checklist — include a decision framework:
@@ -326,17 +326,17 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    **Output Processing** — use `--pretty` for readable JSON, `--head` to limit results, or pipe to `jq` for filtering:
    ```bash
    # Pretty-print results
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --pretty
+   ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --pretty
    # Limit large datasets
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --head 5
+   ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --head 5
    # Filter with jq (pipe)
-   bash ${CLAUDE_SKILL_DIR}/scripts/myapi list-records | jq '.[].name'
+   ${CLAUDE_SKILL_DIR}/scripts/myapi list-records | jq '.[].name'
    ```
 
    **Export Formats** (if the API supports multiple output types):
    - List supported formats (JSON, CSV, xlsx, parquet, etc.)
    - Note which are text-safe vs binary
-   - For binary formats: `bash ${CLAUDE_SKILL_DIR}/scripts/myapi export --format xlsx --raw > output.xlsx`
+   - For binary formats: `${CLAUDE_SKILL_DIR}/scripts/myapi export --format xlsx --raw > output.xlsx`
 
    **Knowledge Delta Principle:** Do not duplicate parameter listings from `--help`. Instead, document which parameters actually matter for common tasks, default behaviors that are surprising, combinations that don't work, and rate limits or response size limits.
 
