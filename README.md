@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/knowsuchagency-mcp2cli-badge.png)](https://mseep.ai/app/knowsuchagency-mcp2cli)
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/knowsuchagency/mcp2cli/main/assets/hero.png" alt="mcp2cli — one CLI for every API" width="700">
 </p>
