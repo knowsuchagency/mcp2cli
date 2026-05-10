@@ -434,7 +434,7 @@ wheels = [
 
 [[package]]
 name = "mcp2cli"
-version = "3.0.1"
+version = "3.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

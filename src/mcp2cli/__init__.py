@@ -1875,6 +1875,7 @@ def build_argparse(
         sub = subparsers.add_parser(
             cmd.name,
             help=escape_argparse_help(cmd.description),
+            description=escape_argparse_help(cmd.description),
         )
         sub.set_defaults(_cmd=cmd)
 

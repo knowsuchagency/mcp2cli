@@ -37,6 +37,11 @@ class TestMCPStdio:
         assert "add-numbers" in r.stdout
         assert "list-items" in r.stdout
 
+    def test_tool_help_shows_description(self):
+        r = self._run("echo", "--help")
+        assert r.returncode == 0
+        assert "Echo back the input" in r.stdout
+
     def test_echo(self):
         r = self._run("echo", "--message", "hello world")
         assert r.returncode == 0
