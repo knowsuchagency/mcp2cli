@@ -2348,14 +2348,15 @@ async def _mcp_session(
     # Handle resource operations
     if resource_action:
         await _handle_resources(
-            session, resource_action, resource_uri, pretty, raw, toon,
+            session, resource_action, resource_uri, pretty, raw, toon, head=head,
         )
         return
 
     # Handle prompt operations
     if prompt_action:
         await _handle_prompts(
-            session, prompt_action, prompt_name, prompt_arguments, pretty, raw, toon,
+            session, prompt_action, prompt_name, prompt_arguments,
+            pretty, raw, toon, head=head,
         )
         return
 
@@ -2407,7 +2408,13 @@ async def _mcp_session(
 
 
 async def _handle_resources(
-    session, action: str, uri: str | None, pretty: bool, raw: bool, toon: bool,
+    session,
+    action: str,
+    uri: str | None,
+    pretty: bool,
+    raw: bool,
+    toon: bool,
+    head: int | None = None,
 ):
     _out = dict(pretty=pretty, raw=raw, toon=toon, head=head)
     if action == "list":
