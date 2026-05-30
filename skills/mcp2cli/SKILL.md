@@ -72,6 +72,8 @@ Options:
   --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
+  --json                  Force valid JSON for every command. --list emits a JSON array;
+                          MCP calls emit the full envelope (structuredContent, isError).
   --toon                  Encode output as TOON (token-efficient for LLMs)
   --head N                Limit output to first N records (arrays)
   --version               Show version

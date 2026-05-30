@@ -217,6 +217,36 @@ mcp2cli @myapi --list --sort alpha
 
 When usage data exists for a source, `--list` defaults to sorting by call frequency. Otherwise insertion order is preserved. Usage data is stored in `~/.cache/mcp2cli/usage.json`.
 
+### JSON output
+
+`--json` forces **valid JSON on stdout for every command**, in every mode. It is the
+machine-readable counterpart to the human-formatted default output, designed for LLM
+agents and scripts that need to parse results reliably.
+
+```bash
+# --list emits a JSON array of command objects (name, description, parameters, ...)
+mcp2cli --mcp https://mcp.example.com/sse --list --json
+mcp2cli --spec ./openapi.json --list --json
+mcp2cli --graphql https://api.example.com/graphql --list --json
+
+# --list --json --compact emits a JSON array of names only
+mcp2cli --mcp https://mcp.example.com/sse --list --json --compact
+
+# MCP tool calls emit the FULL CallToolResult envelope — including
+# structuredContent and isError, not just the flattened text. This surfaces the
+# machine-readable result that modern MCP tools put in structuredContent.
+mcp2cli --mcp https://mcp.example.com/sse --json search --query "test"
+# { "content": [...], "structuredContent": {...}, "isError": false }
+
+# OpenAPI / GraphQL calls emit the response as JSON (non-JSON bodies become a JSON string)
+mcp2cli --spec ./openapi.json --json list-pets
+mcp2cli --graphql https://api.example.com/graphql --json users
+```
+
+`--json` takes precedence over `--raw` and `--toon` (both of which can produce
+non-JSON), so it always wins — that is what makes it a reliable "force JSON" switch.
+Indentation follows the usual rule: pretty on a TTY or with `--pretty`, compact when piped.
+
 ### Output control
 
 ```bash
@@ -289,6 +319,9 @@ Options:
   --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
+  --json                  Force valid JSON output for every command (--list and tool
+                          calls). MCP calls emit the full result envelope including
+                          structuredContent. Takes precedence over --raw and --toon.
   --toon                  Encode output as TOON (token-efficient for LLMs)
   --head N                Limit output to first N records (arrays)
   --version               Show version

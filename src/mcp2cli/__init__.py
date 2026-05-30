@@ -277,6 +277,14 @@ def _apply_head(data, n: int):
     return data
 
 
+def _emit_json(data, pretty: bool = False) -> None:
+    """Print *data* as JSON. Indented when *pretty* or stdout is a TTY, else compact."""
+    if pretty or sys.stdout.isatty():
+        print(json.dumps(data, indent=2))
+    else:
+        print(json.dumps(data))
+
+
 def output_result(
     data,
     *,
@@ -284,7 +292,22 @@ def output_result(
     raw: bool = False,
     toon: bool = False,
     head: int | None = None,
+    json_output: bool = False,
 ):
+    # --json forces valid JSON for every command, overriding --raw and --toon
+    # (both of which can produce non-JSON). Strings that contain JSON are
+    # unwrapped; everything else is emitted as a JSON value (e.g. a string
+    # literal for plain prose), guaranteeing parseable stdout.
+    if json_output:
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+        if head is not None:
+            data = _apply_head(data, head)
+        _emit_json(data, pretty)
+        return
     if raw:
         if isinstance(data, str):
             print(data)
@@ -310,10 +333,53 @@ def output_result(
             file=sys.stderr,
         )
         # Fall through to normal output
-    if pretty or sys.stdout.isatty():
-        print(json.dumps(data, indent=2))
+    _emit_json(data, pretty)
+
+
+def _python_type_name(t: type | None) -> str:
+    """Human/JSON-friendly type label for a ParamDef.python_type (None = boolean flag)."""
+    if t is None:
+        return "boolean"
+    return getattr(t, "__name__", str(t))
+
+
+def _param_to_dict(p: "ParamDef") -> dict:
+    d = {
+        "name": p.name,
+        "type": _python_type_name(p.python_type),
+        "required": p.required,
+        "description": p.description,
+        "location": p.location,
+    }
+    if p.choices:
+        d["choices"] = p.choices
+    return d
+
+
+def command_to_dict(cmd: "CommandDef") -> dict:
+    """Serialize a CommandDef to a JSON-friendly dict for `--list --json`."""
+    d: dict = {"name": cmd.name, "description": cmd.description or ""}
+    if cmd.method:
+        d["method"] = cmd.method.upper()
+    if cmd.path:
+        d["path"] = cmd.path
+    if cmd.tool_name:
+        d["toolName"] = cmd.tool_name
+    if cmd.graphql_operation_type:
+        d["operationType"] = cmd.graphql_operation_type
+    d["parameters"] = [_param_to_dict(p) for p in cmd.params]
+    return d
+
+
+def print_commands_json(
+    commands: "list[CommandDef]", compact: bool = False, pretty: bool = False
+) -> None:
+    """Emit a command list as JSON (array of objects, or names when *compact*)."""
+    if compact:
+        payload = [cmd.name for cmd in commands]
     else:
-        print(json.dumps(data))
+        payload = [command_to_dict(cmd) for cmd in commands]
+    _emit_json(payload, pretty)
 
 
 def _build_http_headers(auth_headers: list[tuple[str, str]], multipart: bool = False) -> dict[str, str]:
@@ -1407,9 +1473,15 @@ def list_graphql_commands(
     source_hash: str = "",
     sort_mode: str | None = None,
     top: int | None = None,
+    json_output: bool = False,
+    pretty: bool = False,
 ):
     """Group commands by operation type and print."""
     commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if json_output:
+        print_commands_json(commands, compact=compact, pretty=pretty)
+        return
 
     if compact:
         print(" ".join(cmd.name for cmd in commands))
@@ -1502,6 +1574,7 @@ def execute_graphql(
     fields_override: str | None = None,
     oauth_provider: "httpx.Auth | None" = None,
     head: int | None = None,
+    json_output: bool = False,
 ):
     """Build and execute a GraphQL query/mutation."""
     document, variables, field_name = _build_graphql_document(
@@ -1525,13 +1598,13 @@ def execute_graphql(
             print(f"GraphQL error: {msgs}", file=sys.stderr)
             sys.exit(1)
         # Partial errors — include them in output
-        output_result(result, pretty=pretty, raw=raw, toon=toon, head=head)
+        output_result(result, pretty=pretty, raw=raw, toon=toon, head=head, json_output=json_output)
         return
 
     data = result.get("data", {})
     # Extract the specific field's data
     field_data = data.get(field_name, data)
-    output_result(field_data, pretty=pretty, raw=raw, toon=toon, head=head)
+    output_result(field_data, pretty=pretty, raw=raw, toon=toon, head=head, json_output=json_output)
 
 
 def handle_graphql(
@@ -1552,6 +1625,7 @@ def handle_graphql(
     sort_mode: str | None = None,
     top: int | None = None,
     compact: bool = False,
+    json_output: bool = False,
 ):
     """Top-level handler for --graphql mode."""
     src_hash = _source_hash_for(url)
@@ -1561,6 +1635,7 @@ def handle_graphql(
     list_kwargs = dict(
         verbose=verbose, compact=compact,
         source_hash=src_hash, sort_mode=sort_mode, top=top,
+        json_output=json_output, pretty=pretty,
     )
 
     if list_mode:
@@ -1568,10 +1643,10 @@ def handle_graphql(
         return
 
     if not remaining:
-        if not compact:
+        if not compact and not json_output:
             print("Available operations:")
         list_graphql_commands(commands, **list_kwargs)
-        if not compact:
+        if not compact and not json_output:
             print("\nUse --list for the same output, or provide a subcommand.")
         return
 
@@ -1587,6 +1662,7 @@ def handle_graphql(
     execute_graphql(
         args, cmd, url, schema, auth_headers, pretty, raw, toon=toon,
         fields_override=fields_override, oauth_provider=oauth_provider,
+        json_output=json_output,
     )
 
     # Record usage after successful execution
@@ -2040,8 +2116,14 @@ def list_openapi_commands(
     source_hash: str = "",
     sort_mode: str | None = None,
     top: int | None = None,
+    json_output: bool = False,
+    pretty: bool = False,
 ):
     commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if json_output:
+        print_commands_json(commands, compact=compact, pretty=pretty)
+        return
 
     if compact:
         print(" ".join(cmd.name for cmd in commands))
@@ -2073,8 +2155,14 @@ def list_mcp_commands(
     source_hash: str = "",
     sort_mode: str | None = None,
     top: int | None = None,
+    json_output: bool = False,
+    pretty: bool = False,
 ):
     commands = _apply_list_options(commands, source_hash, sort_mode, top)
+
+    if json_output:
+        print_commands_json(commands, compact=compact, pretty=pretty)
+        return
 
     if compact:
         print(" ".join(cmd.name for cmd in commands))
@@ -2186,6 +2274,7 @@ def execute_openapi(
     toon: bool = False,
     oauth_provider: "httpx.Auth | None" = None,
     head: int | None = None,
+    json_output: bool = False,
 ):
     path, query_params, extra_headers, body, files = _collect_openapi_params(cmd, args)
     url = base_url.rstrip("/") + path
@@ -2226,6 +2315,14 @@ def execute_openapi(
         if files:
             for _, file_tuple in files.items():
                 file_tuple[1].close()
+
+    if json_output:
+        try:
+            data = resp.json()
+        except Exception:
+            data = resp.text
+        output_result(data, pretty=pretty, head=head, json_output=True)
+        return
 
     if raw:
         sys.stdout.buffer.write(resp.content)
@@ -2271,6 +2368,7 @@ def run_mcp_http(
     top: int | None = None,
     compact: bool = False,
     source_hash: str = "",
+    json_output: bool = False,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -2285,6 +2383,7 @@ def run_mcp_http(
         top=top,
         compact=compact,
         source_hash=source_hash,
+        json_output=json_output,
     )
 
     async def _run():
@@ -2374,6 +2473,7 @@ def run_mcp_stdio(
     top: int | None = None,
     compact: bool = False,
     source_hash: str = "",
+    json_output: bool = False,
 ):
     extra = dict(
         resource_action=resource_action,
@@ -2388,6 +2488,7 @@ def run_mcp_stdio(
         top=top,
         compact=compact,
         source_hash=source_hash,
+        json_output=json_output,
     )
 
     import anyio
@@ -2443,11 +2544,13 @@ async def _mcp_session(
     top: int | None = None,
     compact: bool = False,
     source_hash: str = "",
+    json_output: bool = False,
 ):
     # Handle resource operations
     if resource_action:
         await _handle_resources(
             session, resource_action, resource_uri, pretty, raw, toon, head=head,
+            json_output=json_output,
         )
         return
 
@@ -2455,13 +2558,14 @@ async def _mcp_session(
     if prompt_action:
         await _handle_prompts(
             session, prompt_action, prompt_name, prompt_arguments,
-            pretty, raw, toon, head=head,
+            pretty, raw, toon, head=head, json_output=json_output,
         )
         return
 
     list_kwargs = dict(
         verbose=verbose, compact=compact,
         source_hash=source_hash, sort_mode=sort_mode, top=top,
+        json_output=json_output, pretty=pretty,
     )
 
     if list_mode:
@@ -2478,12 +2582,15 @@ async def _mcp_session(
         if search_pattern:
             commands = _filter_commands(commands, search_pattern)
             if not commands:
-                print(f"\nNo tools matching '{search_pattern}'.")
+                if json_output:
+                    list_mcp_commands(commands, **list_kwargs)
+                else:
+                    print(f"\nNo tools matching '{search_pattern}'.")
                 return
-            if not compact:
+            if not compact and not json_output:
                 print(f"\nTools matching '{search_pattern}':")
         else:
-            if not compact:
+            if not compact and not json_output:
                 print("\nAvailable tools:")
         list_mcp_commands(commands, **list_kwargs)
         return
@@ -2496,6 +2603,12 @@ async def _mcp_session(
         sys.exit(1)
 
     result = await session.call_tool(tool_name, arguments or {})
+
+    if json_output:
+        # Emit the full MCP CallToolResult envelope (content, structuredContent,
+        # isError) using the SDK's own serializer — 100% MCP-compatible.
+        output_result(result.model_dump(mode="json"), pretty=pretty, head=head, json_output=True)
+        return
 
     text = _extract_content_parts(result.content)
     output_result(text, pretty=pretty, raw=raw, toon=toon, head=head)
@@ -2514,8 +2627,9 @@ async def _handle_resources(
     raw: bool,
     toon: bool,
     head: int | None = None,
+    json_output: bool = False,
 ):
-    _out = dict(pretty=pretty, raw=raw, toon=toon, head=head)
+    _out = dict(pretty=pretty, raw=raw, toon=toon, head=head, json_output=json_output)
     if action == "list":
         result = await session.list_resources()
         data = [
@@ -2568,8 +2682,9 @@ async def _handle_prompts(
     raw: bool,
     toon: bool,
     head: int | None = None,
+    json_output: bool = False,
 ):
-    _out = dict(pretty=pretty, raw=raw, toon=toon, head=head)
+    _out = dict(pretty=pretty, raw=raw, toon=toon, head=head, json_output=json_output)
     if action == "list":
         result = await session.list_prompts()
         data = [
@@ -3110,6 +3225,7 @@ def handle_mcp(
     sort_mode: str | None = None,
     top: int | None = None,
     compact: bool = False,
+    json_output: bool = False,
 ):
     # Build a config dict for cache key generation (future-proof)
     config_for_cache = {
@@ -3132,6 +3248,7 @@ def handle_mcp(
             prompt_name=prompt_name,
             prompt_arguments=prompt_arguments,
             head=head,
+            json_output=json_output,
         )
         _dispatch_mcp_call(
             source, is_stdio, auth_headers, env_vars,
@@ -3144,6 +3261,7 @@ def handle_mcp(
     list_kwargs = dict(
         verbose=verbose, compact=compact,
         source_hash=src_hash, sort_mode=sort_mode, top=top,
+        json_output=json_output, pretty=pretty,
     )
 
     if list_mode:
@@ -3157,7 +3275,7 @@ def handle_mcp(
             commands = filter_commands(
                 commands, bake_config.include, bake_config.exclude, bake_config.methods,
             )
-            if not compact:
+            if not compact and not json_output:
                 print("\nAvailable tools:")
             list_mcp_commands(commands, **list_kwargs)
             return
@@ -3169,6 +3287,7 @@ def handle_mcp(
             verbose=verbose,
             sort_mode=sort_mode, top=top, compact=compact,
             source_hash=src_hash,
+            json_output=json_output,
         )
         return
 
@@ -3185,10 +3304,10 @@ def handle_mcp(
         )
 
     if not remaining:
-        if not compact:
+        if not compact and not json_output:
             print("Available tools:")
         list_mcp_commands(commands, **list_kwargs)
-        if not compact:
+        if not compact and not json_output:
             print("\nUse --list for the same output, or provide a subcommand.")
         return
 
@@ -3215,6 +3334,7 @@ def handle_mcp(
         source, is_stdio, auth_headers, env_vars,
         cmd.tool_name, arguments, False, pretty, raw, key, ttl, refresh,
         toon=toon, transport=transport, oauth_provider=oauth_provider,
+        json_output=json_output,
     )
 
     # Record usage after successful execution
@@ -3432,6 +3552,16 @@ def _build_main_parser() -> argparse.ArgumentParser:
     )
     pre.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     pre.add_argument("--raw", action="store_true", help="Print raw response body")
+    pre.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help=(
+            "Force valid JSON output for every command. --list emits a JSON array of "
+            "commands; MCP tool calls emit the full result envelope including "
+            "structuredContent and isError. Takes precedence over --raw and --toon."
+        ),
+    )
     pre.add_argument(
         "--toon",
         action="store_true",
@@ -3693,32 +3823,28 @@ def _handle_session_operations(
 
     # --- Session client mode ---
     sess_name = pre_args.session
+    _sess_out = dict(
+        pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
+        json_output=pre_args.json_output,
+    )
 
     if pre_args.list_resources:
         result = _session_request(sess_name, "list_resources")
-        output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-        )
+        output_result(result, **_sess_out)
         return True
     if pre_args.list_resource_templates:
         result = _session_request(sess_name, "list_resource_templates")
-        output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-        )
+        output_result(result, **_sess_out)
         return True
     if pre_args.read_resource:
         result = _session_request(
             sess_name, "read_resource", {"uri": pre_args.read_resource}
         )
-        output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-        )
+        output_result(result, **_sess_out)
         return True
     if pre_args.list_prompts:
         result = _session_request(sess_name, "list_prompts")
-        output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-        )
+        output_result(result, **_sess_out)
         return True
     if pre_args.get_prompt:
         p_args = {}
@@ -3731,9 +3857,7 @@ def _handle_session_operations(
             "get_prompt",
             {"name": pre_args.get_prompt, "arguments": p_args},
         )
-        output_result(
-            result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon,
-        )
+        output_result(result, **_sess_out)
         return True
     if pre_args.list_commands:
         result = _session_request(sess_name, "list_tools")
@@ -3741,21 +3865,36 @@ def _handle_session_operations(
         if search_pattern:
             commands = _filter_commands(commands, search_pattern)
             if not commands:
-                print(f"\nNo tools matching '{search_pattern}'.")
+                if pre_args.json_output:
+                    list_mcp_commands(
+                        commands, verbose=pre_args.verbose,
+                        json_output=True, pretty=pre_args.pretty,
+                    )
+                else:
+                    print(f"\nNo tools matching '{search_pattern}'.")
                 return True
-            print(f"\nTools matching '{search_pattern}':")
-        else:
+            if not pre_args.json_output:
+                print(f"\nTools matching '{search_pattern}':")
+        elif not pre_args.json_output:
             print("\nAvailable tools:")
-        list_mcp_commands(commands, verbose=pre_args.verbose)
+        list_mcp_commands(
+            commands, verbose=pre_args.verbose,
+            json_output=pre_args.json_output, pretty=pre_args.pretty,
+        )
         return True
 
     # Tool call via session
     if not remaining:
         result = _session_request(sess_name, "list_tools")
         commands = extract_mcp_commands(result)
-        print("Available tools:")
-        list_mcp_commands(commands, verbose=pre_args.verbose)
-        print("\nUse --list for the same output, or provide a subcommand.")
+        if not pre_args.json_output:
+            print("Available tools:")
+        list_mcp_commands(
+            commands, verbose=pre_args.verbose,
+            json_output=pre_args.json_output, pretty=pre_args.pretty,
+        )
+        if not pre_args.json_output:
+            print("\nUse --list for the same output, or provide a subcommand.")
         return True
 
     tools = _session_request(sess_name, "list_tools")
@@ -3781,9 +3920,7 @@ def _handle_session_operations(
     result = _session_request(
         sess_name, "call_tool", {"name": cmd.tool_name, "arguments": arguments}
     )
-    output_result(
-        result, pretty=pre_args.pretty, raw=pre_args.raw, toon=pre_args.toon
-    )
+    output_result(result, **_sess_out)
     return True
 
 
@@ -3848,15 +3985,19 @@ def _handle_openapi_mode(
     list_kwargs = dict(
         verbose=pre_args.verbose, compact=pre_args.compact,
         source_hash=src_hash, sort_mode=pre_args.sort_mode, top=pre_args.top,
+        json_output=pre_args.json_output, pretty=pre_args.pretty,
     )
 
     if pre_args.list_commands:
         if search_pattern:
             commands = _filter_commands(commands, search_pattern)
             if not commands:
-                print(f"\nNo tools matching '{search_pattern}'.")
+                if not pre_args.json_output:
+                    print(f"\nNo tools matching '{search_pattern}'.")
+                else:
+                    list_openapi_commands(commands, **list_kwargs)
                 return
-            if not pre_args.compact:
+            if not pre_args.compact and not pre_args.json_output:
                 print(f"\nTools matching '{search_pattern}':")
         list_openapi_commands(commands, **list_kwargs)
         return
@@ -3900,7 +4041,7 @@ def _handle_openapi_mode(
     execute_openapi(
         args, cmd, base_url, auth_headers,
         pre_args.pretty, pre_args.raw, toon=pre_args.toon,
-        oauth_provider=oauth_provider,
+        oauth_provider=oauth_provider, json_output=pre_args.json_output,
     )
 
     # Record usage after successful execution
@@ -3960,6 +4101,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             sort_mode=pre_args.sort_mode,
             top=pre_args.top,
             compact=pre_args.compact,
+            json_output=pre_args.json_output,
         )
         return
 
@@ -3994,6 +4136,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             sort_mode=pre_args.sort_mode,
             top=pre_args.top,
             compact=pre_args.compact,
+            json_output=pre_args.json_output,
         )
         return
 
