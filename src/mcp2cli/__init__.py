@@ -810,14 +810,52 @@ def build_oauth_provider(
            and the CLI hangs on the callback.
 
         We patch both by restoring ``token_expiry_time`` from a sidecar
-        we persist in :class:`FileTokenStorage`, and by wiping the cached
-        ``client_info`` from disk and memory whenever a refresh fails so
-        the subsequent re-auth performs fresh Dynamic Client Registration.
+        we persist in :class:`FileTokenStorage`, and — only when the token
+        endpoint *definitively* rejects the client or grant — by wiping the
+        cached ``client_info`` from disk and memory so the subsequent re-auth
+        performs fresh Dynamic Client Registration.
+
+        Issue #59: the wipe must NOT fire on a transient refresh failure (a
+        brief 5xx, clock skew, a momentarily-unhappy token endpoint). Erasing
+        ``client.json``/``tokens.json`` on a transient blip forces a full
+        interactive ``authorization_code`` consent on the next call, which
+        permanently bricks any headless/scheduled run that has no browser. We
+        therefore preserve the persisted OAuth state on anything that isn't a
+        clean ``invalid_client``/``invalid_grant`` so a later retry can refresh
+        again on its own.
         """
 
         async def _initialize(self) -> None:
             await super()._initialize()
             _restore_token_expiry_from_sidecar(self.context)
+
+        @staticmethod
+        async def _refresh_failure_is_definitive(response) -> bool:
+            """Return True only when a failed refresh means the cached client
+            or grant is genuinely dead and must be discarded to recover.
+
+            Distinguishes a definitive ``invalid_client`` / ``invalid_grant``
+            rejection (RFC 6749 §5.2) from a transient transport/server error.
+            Returns False — i.e. "keep the persisted state" — for a 5xx, a
+            malformed body, or any other failure a later retry might survive
+            (issue #59).
+            """
+            status = getattr(response, "status_code", None)
+            # Per RFC 6749 §5.2 a 401 from the token endpoint means client
+            # authentication failed (invalid_client) even when the body
+            # carries no machine-readable error code — definitive.
+            if status == 401:
+                return True
+            # Anything that isn't an OAuth 400/401 error response (notably a
+            # 5xx) is transient: keep the cache so the next run can retry.
+            if status != 400:
+                return False
+            try:
+                error = json.loads(await response.aread()).get("error")
+            except Exception:
+                # Unparseable body on a 400 — be conservative and preserve.
+                return False
+            return error in ("invalid_client", "invalid_grant", "unauthorized_client")
 
         async def _handle_refresh_response(self, response) -> bool:
             # Issue #58: RFC 6749 §5.1 permits a refresh response to omit
@@ -832,15 +870,23 @@ def build_oauth_provider(
             )
             ok = await super()._handle_refresh_response(response)
             if not ok:
-                # Refresh failed. The cached DCR client_id may have been
-                # forgotten by the auth server too; clear it so the
-                # subsequent 401 fallback performs a fresh registration
-                # instead of /authorize?client_id=<stale> → opaque 500.
-                self.context.client_info = None
-                storage = self.context.storage
-                if isinstance(storage, FileTokenStorage):
-                    storage.clear_client_info()
-                    storage.clear_tokens()
+                # Refresh failed. Only when the token endpoint *definitively*
+                # rejects us (invalid_client / invalid_grant) do we wipe the
+                # cached DCR client_id + tokens so the subsequent 401 fallback
+                # performs a fresh registration instead of
+                # /authorize?client_id=<stale> → opaque 500 (issue #54).
+                #
+                # A transient failure (5xx, blip, clock skew) must NOT erase
+                # the cache — doing so would force an interactive consent that
+                # no headless/scheduled run can complete (issue #59). Leaving
+                # client.json/tokens.json in place lets the next run simply
+                # retry the refresh.
+                if await self._refresh_failure_is_definitive(response):
+                    self.context.client_info = None
+                    storage = self.context.storage
+                    if isinstance(storage, FileTokenStorage):
+                        storage.clear_client_info()
+                        storage.clear_tokens()
                 return ok
             # Carry the prior refresh token forward when the server did not
             # issue a new one, then re-persist so it survives a restart.

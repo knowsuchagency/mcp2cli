@@ -256,8 +256,8 @@ class TestRobustOAuthClientProvider:
         anyio.run(_drive)
 
     def test_refresh_failure_clears_client_info(self, tmp_path, monkeypatch):
-        """When a refresh response is non-2xx, the cached DCR client_id is
-        cleared so the subsequent re-auth performs fresh registration."""
+        """A definitive invalid_grant rejection clears the cached DCR
+        client_id so the subsequent re-auth performs fresh registration."""
         import anyio
         from mcp.shared.auth import OAuthClientInformationFull
 
@@ -294,6 +294,101 @@ class TestRobustOAuthClientProvider:
             ok = await provider._handle_refresh_response(_FakeResponse())
             assert ok is False
             # In-memory and on-disk client_info both cleared
+            assert provider.context.client_info is None
+            assert not storage._client_path.exists()
+
+        anyio.run(_drive)
+
+    def test_transient_refresh_failure_preserves_cache(self, tmp_path, monkeypatch):
+        """Issue #59: a transient refresh failure (5xx, network blip) must
+        NOT erase client.json/tokens.json, otherwise the next headless run
+        is forced into an interactive consent it can never complete."""
+        import anyio
+        from mcp.shared.auth import OAuthClientInformationFull
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        storage = mcp2cli.FileTokenStorage("https://example.com/mcp")
+
+        async def _setup():
+            await storage.set_client_info(
+                OAuthClientInformationFull(
+                    client_id="dcr-id",
+                    redirect_uris=["http://localhost:19883/callback"],
+                )
+            )
+            await storage.set_tokens(
+                OAuthToken(
+                    access_token="a",
+                    token_type="Bearer",
+                    refresh_token="r",
+                    expires_in=3600,
+                )
+            )
+
+        anyio.run(_setup)
+        assert storage._client_path.exists()
+        assert storage._tokens_path.exists()
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            redirect_uri="http://localhost:19883/callback",
+        )
+
+        # A 503 from the token endpoint — transient, recoverable on retry.
+        class _FakeResponse:
+            status_code = 503
+            async def aread(self):
+                return b"<html>Service Unavailable</html>"
+
+        async def _drive():
+            await provider._initialize()
+            provider.context.client_info = await storage.get_client_info()
+
+            ok = await provider._handle_refresh_response(_FakeResponse())
+            assert ok is False
+            # Persisted OAuth state survives so a later run can refresh again.
+            assert provider.context.client_info is not None
+            assert storage._client_path.exists()
+            assert storage._tokens_path.exists()
+
+        anyio.run(_drive)
+
+    def test_unauthorized_refresh_failure_clears_cache(self, tmp_path, monkeypatch):
+        """A bare 401 from the token endpoint means client authentication
+        failed (RFC 6749 §5.2) — definitive, so the cache is wiped."""
+        import anyio
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        storage = mcp2cli.FileTokenStorage("https://example.com/mcp")
+
+        async def _setup():
+            await storage.set_client_info(
+                OAuthClientInformationFull(
+                    client_id="stale-dcr-id",
+                    redirect_uris=["http://localhost:19883/callback"],
+                )
+            )
+
+        anyio.run(_setup)
+
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp",
+            redirect_uri="http://localhost:19883/callback",
+        )
+
+        class _FakeResponse:
+            status_code = 401
+            async def aread(self):
+                return b""
+
+        async def _drive():
+            await provider._initialize()
+            provider.context.client_info = await storage.get_client_info()
+
+            ok = await provider._handle_refresh_response(_FakeResponse())
+            assert ok is False
             assert provider.context.client_info is None
             assert not storage._client_path.exists()
 
