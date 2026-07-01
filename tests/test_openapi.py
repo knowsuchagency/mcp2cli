@@ -109,6 +109,106 @@ class TestBuildArgparse:
         args = parser.parse_args(["list-schedule", "--workload", "90"])
         assert args.workload == 90
 
+    def test_openapi_31_search_query_wire_names_are_preserved(self):
+        spec = {
+            "openapi": "3.1.0",
+            "info": {"title": "Xquik API", "version": "1.0"},
+            "servers": [{"url": "https://xquik.com"}],
+            "paths": {
+                "/api/v1/x/tweets/search": {
+                    "get": {
+                        "operationId": "searchTweets",
+                        "summary": "Search tweets",
+                        "tags": ["Tweets"],
+                        "security": [{"apiKey": []}, {"oauthBearer": []}, {}],
+                        "parameters": [
+                            {
+                                "name": "q",
+                                "in": "query",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "queryType",
+                                "in": "query",
+                                "schema": {
+                                    "type": "string",
+                                    "enum": ["Latest", "Top"],
+                                    "default": "Latest",
+                                },
+                            },
+                            {
+                                "name": "sinceTime",
+                                "in": "query",
+                                "schema": {"type": "string"},
+                            },
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "schema": {
+                                    "type": "integer",
+                                    "default": 20,
+                                    "maximum": 200,
+                                },
+                            },
+                        ],
+                        "responses": {"200": {"description": "Search results"}},
+                    }
+                }
+            },
+            "components": {
+                "securitySchemes": {
+                    "apiKey": {
+                        "type": "apiKey",
+                        "in": "header",
+                        "name": "x-api-key",
+                    },
+                    "oauthBearer": {"type": "http", "scheme": "bearer"},
+                }
+            },
+        }
+
+        cmds = extract_openapi_commands(spec)
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        assert cmd.name == "search-tweets"
+
+        query_type = next(p for p in cmd.params if p.original_name == "queryType")
+        since_time = next(p for p in cmd.params if p.original_name == "sinceTime")
+        limit = next(p for p in cmd.params if p.original_name == "limit")
+        assert query_type.name == "query-type"
+        assert query_type.choices == ["Latest", "Top"]
+        assert since_time.name == "since-time"
+        assert limit.python_type is int
+
+        pre = argparse.ArgumentParser(add_help=False)
+        parser = build_argparse(cmds, pre)
+        args = parser.parse_args(
+            [
+                "search-tweets",
+                "--q",
+                "openapi",
+                "--query-type",
+                "Top",
+                "--since-time",
+                "2026-01-01T00:00:00Z",
+                "--limit",
+                "25",
+            ]
+        )
+
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert path == "/api/v1/x/tweets/search"
+        assert query == {
+            "q": "openapi",
+            "queryType": "Top",
+            "sinceTime": "2026-01-01T00:00:00Z",
+            "limit": 25,
+        }
+        assert headers == {}
+        assert body is None
+        assert files is None
+
 
 class TestExecuteOpenAPI:
     """Integration tests against the local petstore HTTP server."""
