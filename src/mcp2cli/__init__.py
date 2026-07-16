@@ -2729,14 +2729,14 @@ async def _mcp_session(
     )
 
     if list_mode:
-        result = await session.list_tools()
+        all_tools = await _list_all_tools(session)
         tools = [
             {
                 "name": t.name,
                 "description": t.description or "",
                 "inputSchema": t.inputSchema or {},
             }
-            for t in result.tools
+            for t in all_tools
         ]
         commands = extract_mcp_commands(tools)
         if search_pattern:
@@ -3032,11 +3032,27 @@ def _extract_content_parts(content_list, *, attrs=("text", "data")) -> str:
     return "\n".join(parts) if parts else ""
 
 
+async def _list_all_tools(session):
+    """Fetch every tool from an MCP session, following `nextCursor` until
+    exhausted. Per the MCP spec, tools/list is paginated and page size is
+    entirely up to the server, so a single call is not guaranteed to return
+    the full tool set: https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/pagination
+    """
+    tools = []
+    cursor = None
+    while True:
+        result = await session.list_tools(cursor=cursor)
+        tools.extend(result.tools)
+        cursor = result.nextCursor
+        if not cursor:
+            return tools
+
+
 async def _dispatch_list_tools(session, params):
-    result = await session.list_tools()
+    tools = await _list_all_tools(session)
     return [
         {"name": t.name, "description": t.description or "", "inputSchema": t.inputSchema or {}}
-        for t in result.tools
+        for t in tools
     ]
 
 
@@ -3517,14 +3533,14 @@ def _fetch_mcp_tools(
     tools_result: list[dict] = []
 
     async def _extract_tools(session):
-        result = await session.list_tools()
+        all_tools = await _list_all_tools(session)
         tools_result.extend(
             {
                 "name": t.name,
                 "description": t.description or "",
                 "inputSchema": t.inputSchema or {},
             }
-            for t in result.tools
+            for t in all_tools
         )
 
     async def _run():

@@ -1,6 +1,7 @@
 """Tests for helper functions and data structures."""
 
 import argparse
+import asyncio
 import json
 import shutil
 
@@ -10,6 +11,7 @@ from mcp2cli import (
     _apply_head,
     _collect_openapi_params,
     _find_toon_cli,
+    _list_all_tools,
     _split_at_subcommand,
     _toon_encode,
     cache_key_for,
@@ -609,3 +611,53 @@ class TestCollectOpenAPIParams:
         args = argparse.Namespace(args='{"key": "value"}', stdin=False)
         _, _, _, body, _ = _collect_openapi_params(cmd, args)
         assert body == {"args": {"key": "value"}}
+
+
+class _FakePage:
+    def __init__(self, tools, next_cursor=None):
+        self.tools = tools
+        self.nextCursor = next_cursor
+
+
+class _FakeSession:
+    """Fake MCP session whose list_tools() serves canned pages, keyed by cursor."""
+
+    def __init__(self, pages):
+        # pages: list of (cursor_expected, _FakePage) in order
+        self._pages = pages
+        self.calls = []
+
+    async def list_tools(self, cursor=None):
+        self.calls.append(cursor)
+        expected_cursor, page = self._pages[len(self.calls) - 1]
+        assert cursor == expected_cursor, (
+            f"call {len(self.calls)}: expected cursor={expected_cursor!r}, got {cursor!r}"
+        )
+        return page
+
+
+class TestListAllTools:
+    def test_single_page_no_cursor(self):
+        """A server that never sets nextCursor is fetched in exactly one call."""
+        session = _FakeSession([(None, _FakePage(["a", "b"], next_cursor=None))])
+        tools = asyncio.run(_list_all_tools(session))
+        assert tools == ["a", "b"]
+        assert session.calls == [None]
+
+    def test_follows_next_cursor_across_pages(self):
+        """A paginated server's tools are all collected across multiple calls."""
+        session = _FakeSession(
+            [
+                (None, _FakePage(["a", "b"], next_cursor="page2")),
+                ("page2", _FakePage(["c", "d"], next_cursor="page3")),
+                ("page3", _FakePage(["e"], next_cursor=None)),
+            ]
+        )
+        tools = asyncio.run(_list_all_tools(session))
+        assert tools == ["a", "b", "c", "d", "e"]
+        assert session.calls == [None, "page2", "page3"]
+
+    def test_empty_result(self):
+        session = _FakeSession([(None, _FakePage([], next_cursor=None))])
+        tools = asyncio.run(_list_all_tools(session))
+        assert tools == []
