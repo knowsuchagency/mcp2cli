@@ -85,6 +85,8 @@ class BakeConfig:
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
+    name: str | None = None
+    description: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2187,6 +2189,8 @@ def _run_baked(name: str, argv: list[str]) -> None:
         include=cfg.get("include", []),
         exclude=cfg.get("exclude", []),
         methods=cfg.get("methods", []),
+        name=name,
+        description=cfg.get("description") or None,
     )
     _main_impl(synthetic_argv, bake_config=bake_config)
 
@@ -2197,11 +2201,14 @@ def _run_baked(name: str, argv: list[str]) -> None:
 
 
 def build_argparse(
-    commands: list[CommandDef], pre_parser: argparse.ArgumentParser
+    commands: list[CommandDef],
+    pre_parser: argparse.ArgumentParser,
+    prog: str | None = None,
+    description: str | None = None,
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mcp2cli",
-        description="Turn any MCP server or OpenAPI spec into a CLI",
+        prog=prog or "mcp2cli",
+        description=description or "Turn any MCP server or OpenAPI spec into a CLI",
         parents=[pre_parser],
     )
     subparsers = parser.add_subparsers(dest="_command")
@@ -3477,7 +3484,12 @@ def handle_mcp(
         return
 
     pre = argparse.ArgumentParser(add_help=False)
-    parser = build_argparse(commands, pre)
+    parser = build_argparse(
+        commands,
+        pre,
+        prog=bake_config.name if bake_config else None,
+        description=bake_config.description if bake_config else None,
+    )
     args = parser.parse_args(remaining)
 
     if not hasattr(args, "_cmd"):
@@ -4195,7 +4207,12 @@ def _handle_openapi_mode(
                 )
                 sys.exit(1)
 
-    parser = build_argparse(commands, pre)
+    parser = build_argparse(
+        commands,
+        pre,
+        prog=bake_config.name if bake_config else None,
+        description=bake_config.description if bake_config else None,
+    )
     args = parser.parse_args(remaining)
 
     if not hasattr(args, "_cmd"):

@@ -408,6 +408,35 @@ class TestBakeCreateAndUse:
         assert "echo" in r.stdout
         assert "deploy" not in r.stdout
 
+    def test_run_baked_help_shows_name_and_description(self, tmp_path, petstore_server):
+        cfg_dir = tmp_path / "config"
+        cache_dir = tmp_path / "cache"
+        r = _run(
+            "bake", "create", "petstore",
+            "--description", "petstore cli",
+            "--spec", f"{petstore_server}/openapi.json",
+            config_dir=cfg_dir, cache_dir=cache_dir,
+        )
+        assert r.returncode == 0
+
+        r = _run("@petstore", "-h", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert r.returncode == 0
+        assert "usage: petstore" in r.stdout
+        assert "petstore cli" in r.stdout
+
+    def test_run_baked_help_shows_name_without_description(self, tmp_path):
+        cfg_dir = tmp_path / "config"
+        cache_dir = tmp_path / "cache"
+        _run(
+            "bake", "create", "mytools",
+            "--mcp-stdio", f"{sys.executable} {MCP_SERVER}",
+            config_dir=cfg_dir, cache_dir=cache_dir,
+        )
+        r = _run("@mytools", "-h", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert r.returncode == 0
+        assert "usage: mytools" in r.stdout
+        assert "Turn any MCP server or OpenAPI spec into a CLI" in r.stdout
+
     def test_run_baked_nonexistent(self, tmp_path):
         cfg_dir = tmp_path / "config"
         cache_dir = tmp_path / "cache"
