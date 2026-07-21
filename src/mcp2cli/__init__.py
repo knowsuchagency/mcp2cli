@@ -280,9 +280,9 @@ def _apply_head(data, n: int):
 def _emit_json(data, pretty: bool = False) -> None:
     """Print *data* as JSON. Indented when *pretty* or stdout is a TTY, else compact."""
     if pretty or sys.stdout.isatty():
-        print(json.dumps(data, indent=2))
+        print(json.dumps(data, indent=2, ensure_ascii=False))
     else:
-        print(json.dumps(data))
+        print(json.dumps(data, ensure_ascii=False))
 
 
 def output_result(
@@ -312,7 +312,7 @@ def output_result(
         if isinstance(data, str):
             print(data)
         else:
-            print(json.dumps(data))
+            print(json.dumps(data, ensure_ascii=False))
         return
     if isinstance(data, str):
         try:
@@ -323,7 +323,7 @@ def output_result(
     if head is not None:
         data = _apply_head(data, head)
     if toon:
-        encoded = _toon_encode(json.dumps(data))
+        encoded = _toon_encode(json.dumps(data, ensure_ascii=False))
         if encoded is not None:
             print(encoded, end="")
             return
@@ -2093,7 +2093,7 @@ def _bake_show(argv: list[str]) -> None:
             else:
                 masked.append([name, val[:4] + "****" if len(val) > 4 else "****"])
         display["auth_headers"] = masked
-    print(json.dumps(display, indent=2))
+    print(json.dumps(display, indent=2, ensure_ascii=False))
 
 
 def _bake_remove(argv: list[str]) -> None:

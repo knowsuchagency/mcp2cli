@@ -63,6 +63,12 @@ class TestOutputResultJson:
         assert "\n  " in out
         assert json.loads(out) == {"a": 1}
 
+    def test_non_ascii_emitted_as_utf8(self, capsys):
+        output_result({"content": ["返回首页"]}, json_output=True)
+        out = capsys.readouterr().out
+        assert "\\u" not in out
+        assert json.loads(out) == {"content": ["返回首页"]}
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: command serialization
