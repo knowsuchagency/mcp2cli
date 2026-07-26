@@ -845,7 +845,7 @@ def extract_mcp_commands(tools: list[dict]) -> list[CommandDef]:
     for tool in tools:
         name = to_kebab(tool.get("name", "unknown"))
         desc = tool.get("description", "")
-        schema = tool.get("inputSchema", {})
+        schema = tool.get("inputSchema") or {}
         required_fields = set(schema.get("required", []))
         params: list[ParamDef] = []
 

@@ -447,6 +447,21 @@ class TestExtractMCPCommands:
         assert cmds[0].name == "list-items"
         assert cmds[0].tool_name == "list_items"
 
+    def test_none_input_schema(self):
+        """Tools with inputSchema=None must not raise AttributeError (GH #41)."""
+        tools = [{"name": "no_schema", "description": "No schema", "inputSchema": None}]
+        cmds = extract_mcp_commands(tools)
+        assert len(cmds) == 1
+        assert cmds[0].name == "no-schema"
+        assert cmds[0].params == []
+
+    def test_missing_input_schema(self):
+        """Tools with no inputSchema key must not raise AttributeError (GH #41)."""
+        tools = [{"name": "no_schema", "description": "No schema"}]
+        cmds = extract_mcp_commands(tools)
+        assert len(cmds) == 1
+        assert cmds[0].params == []
+
 
 class TestSplitAtSubcommand:
     """Tests for _split_at_subcommand() — GH #15."""
