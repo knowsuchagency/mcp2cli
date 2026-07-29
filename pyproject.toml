@@ -10,7 +10,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "httpx",
-    "mcp>=1.0",
+    "mcp>=1.0,<2",
     "pyyaml",
 ]
 
