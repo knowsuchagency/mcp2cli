@@ -85,6 +85,18 @@ class BakeConfig:
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
     methods: list[str] = field(default_factory=list)
+    prog: str | None = None
+    description: str | None = None
+
+
+_DEFAULT_PARSER_DESCRIPTION = "Turn any MCP server or OpenAPI spec into a CLI"
+
+
+def _parser_branding(bake_config: BakeConfig | None) -> tuple[str, str]:
+    if bake_config is not None and bake_config.prog is not None:
+        description = bake_config.description or _DEFAULT_PARSER_DESCRIPTION
+        return bake_config.prog, description
+    return "mcp2cli", _DEFAULT_PARSER_DESCRIPTION
 
 
 # ---------------------------------------------------------------------------
@@ -2187,6 +2199,8 @@ def _run_baked(name: str, argv: list[str]) -> None:
         include=cfg.get("include", []),
         exclude=cfg.get("exclude", []),
         methods=cfg.get("methods", []),
+        prog=name,
+        description=cfg.get("description"),
     )
     _main_impl(synthetic_argv, bake_config=bake_config)
 
@@ -2197,11 +2211,15 @@ def _run_baked(name: str, argv: list[str]) -> None:
 
 
 def build_argparse(
-    commands: list[CommandDef], pre_parser: argparse.ArgumentParser
+    commands: list[CommandDef],
+    pre_parser: argparse.ArgumentParser,
+    *,
+    prog: str = "mcp2cli",
+    description: str = _DEFAULT_PARSER_DESCRIPTION,
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="mcp2cli",
-        description="Turn any MCP server or OpenAPI spec into a CLI",
+        prog=prog,
+        description=description,
         parents=[pre_parser],
     )
     subparsers = parser.add_subparsers(dest="_command")
@@ -3477,7 +3495,8 @@ def handle_mcp(
         return
 
     pre = argparse.ArgumentParser(add_help=False)
-    parser = build_argparse(commands, pre)
+    prog, description = _parser_branding(bake_config)
+    parser = build_argparse(commands, pre, prog=prog, description=description)
     args = parser.parse_args(remaining)
 
     if not hasattr(args, "_cmd"):
@@ -4195,7 +4214,8 @@ def _handle_openapi_mode(
                 )
                 sys.exit(1)
 
-    parser = build_argparse(commands, pre)
+    prog, description = _parser_branding(bake_config)
+    parser = build_argparse(commands, pre, prog=prog, description=description)
     args = parser.parse_args(remaining)
 
     if not hasattr(args, "_cmd"):

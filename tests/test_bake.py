@@ -17,6 +17,7 @@ from mcp2cli import (
     _load_baked,
     _baked_to_argv,
     _BAKE_NAME_RE,
+    _parser_branding,
 )
 
 MCP_SERVER = str(Path(__file__).parent / "mcp_test_server.py")
@@ -414,6 +415,36 @@ class TestBakeCreateAndUse:
         r = _run("@nope", "--list", config_dir=cfg_dir, cache_dir=cache_dir)
         assert r.returncode != 0
         assert "no baked tool" in r.stderr
+
+    def test_parser_branding_from_bake_config(self):
+        assert _parser_branding(None)[0] == "mcp2cli"
+        cfg = BakeConfig(prog="petstore", description="petstore cli")
+        assert _parser_branding(cfg) == ("petstore", "petstore cli")
+        cfg_default_desc = BakeConfig(prog="petstore")
+        prog, description = _parser_branding(cfg_default_desc)
+        assert prog == "petstore"
+        assert "Turn any MCP server" in description
+
+    def test_baked_help_uses_name_and_description(self, tmp_path, petstore_server):
+        cfg_dir = tmp_path / "config"
+        cache_dir = tmp_path / "cache"
+        r = _run(
+            "bake",
+            "create",
+            "petstore",
+            "--description",
+            "petstore cli",
+            "--spec",
+            f"{petstore_server}/openapi.json",
+            config_dir=cfg_dir,
+            cache_dir=cache_dir,
+        )
+        assert r.returncode == 0
+
+        r = _run("@petstore", "-h", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert r.returncode == 0
+        assert "usage: petstore" in r.stdout
+        assert "petstore cli" in r.stdout
 
     def test_invalid_name_rejected(self, tmp_path):
         cfg_dir = tmp_path / "config"
