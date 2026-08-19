@@ -30,6 +30,13 @@ jobs:
       - run: uv pip install -e . --no-deps
       - run: uv pip install "${{ matrix.mcp }}" httpx pyyaml pytest pytest-asyncio tiktoken
 
+      # The --toon tests assert real encoder output. Installing the CLI here
+      # puts `toon` on PATH, so they exercise it deterministically instead of
+      # relying on npx fetching the package mid-test: runners ship npx but not
+      # the package, and that implicit download raced _toon_encode's 10s
+      # timeout — 5 matrix jobs won it, 1 lost, so main went red at random.
+      - run: npm install -g @toon-format/cli
+
       - name: Report resolved versions
         run: .venv/bin/python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
 

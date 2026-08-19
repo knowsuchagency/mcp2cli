@@ -253,20 +253,27 @@ class TestApplyHead:
 
 
 class TestToonEncode:
+    def test_find_toon_cli_prefers_installed_binary(self, monkeypatch):
+        """A real `toon` on PATH is used directly, without involving npx."""
+        monkeypatch.setattr(shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+        assert _find_toon_cli() == ("toon",)
+
     def test_find_toon_cli_npx(self, monkeypatch):
-        """Falls back to npx when toon binary isn't in PATH."""
-        original_which = shutil.which
-        def mock_which(cmd):
-            if cmd == "toon":
-                return None
-            return original_which(cmd)
-        monkeypatch.setattr(shutil, "which", mock_which)
-        result = _find_toon_cli()
-        # Either npx is available or None
-        if shutil.which("npx") is not None:
-            assert result == "npx @toon-format/cli"
-        else:
-            assert result is None
+        """Falls back to npx when the toon binary isn't in PATH.
+
+        The npx form must pass --no: without it npx silently downloads the
+        package from the registry mid-command, so --toon becomes a multi-second
+        network fetch racing _toon_encode's timeout.
+        """
+        monkeypatch.setattr(
+            shutil, "which", lambda cmd: None if cmd == "toon" else f"/usr/bin/{cmd}"
+        )
+        assert _find_toon_cli() == ("npx", "--no", "@toon-format/cli")
+
+    def test_find_toon_cli_absent(self, monkeypatch):
+        """No toon binary and no npx means no TOON support."""
+        monkeypatch.setattr(shutil, "which", lambda cmd: None)
+        assert _find_toon_cli() is None
 
     def test_toon_encode_uniform_array(self):
         """TOON CLI encodes a uniform array into tabular format."""

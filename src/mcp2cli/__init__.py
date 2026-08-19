@@ -272,13 +272,16 @@ def to_kebab(name: str) -> str:
     return s.replace("_", "-").lower()
 
 
-def _find_toon_cli() -> str | None:
-    """Return the command to invoke the TOON CLI, or None if unavailable."""
+def _find_toon_cli() -> tuple[str, ...] | None:
+    """Return argv for the TOON CLI, or None if unavailable."""
     if shutil.which("toon"):
-        return "toon"
-    # Check for npx (ships with Node.js)
+        return ("toon",)
+    # npx ships with Node.js, but having it says nothing about the package.
+    # `--no` forbids npx's implicit registry download, so a missing package
+    # fails in about a second instead of turning --toon into a network fetch
+    # racing the timeout in _toon_encode.
     if shutil.which("npx"):
-        return "npx @toon-format/cli"
+        return ("npx", "--no", "@toon-format/cli")
     return None
 
 
@@ -289,7 +292,7 @@ def _toon_encode(json_str: str) -> str | None:
         return None
     try:
         result = subprocess.run(
-            cmd.split(),
+            cmd,
             input=json_str,
             capture_output=True,
             text=True,
