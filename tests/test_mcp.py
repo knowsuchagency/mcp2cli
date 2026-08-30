@@ -717,3 +717,18 @@ class TestConnectionErrors:
         )
         assert r.returncode != 0
         assert "Traceback" in r.stderr
+
+
+    def test_run_mcp_clean_server_disconnect(self, capsys):
+        import anyio
+        from mcp2cli import _run_mcp_clean
+
+        async def throw_disconnect():
+            raise anyio.EndOfStream("Server disconnected")
+
+        with pytest.raises(SystemExit) as caught:
+            _run_mcp_clean(throw_disconnect, "test")
+        
+        assert caught.value.code == 1
+        captured = capsys.readouterr()
+        assert "the server disconnected unexpectedly" in captured.err
