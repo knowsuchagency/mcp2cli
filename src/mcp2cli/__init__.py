@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from importlib.metadata import version as _pkg_version
 
-__version__ = _pkg_version("mcp2cli")
+try:
+    __version__ = _pkg_version("mcp2cli")
+except Exception:
+    __version__ = "0.0.0-dev"
 
 import argparse
 import copy
@@ -2881,6 +2884,8 @@ def _run_mcp_clean(fn, source: str):
                 " — the server rejected the request; pass credentials with "
                 "--auth-header 'Name:Value' or use the --oauth-* options"
             )
+        elif any(phrase in lowered for phrase in ["endofstream", "brokenpipeerror", "connection closed", "disconnect"]):
+            hint = " — the server disconnected unexpectedly. It may have crashed or terminated."
         else:
             hint = ""
         print(f"Error: cannot use MCP server at {source}: {message}{hint}", file=sys.stderr)
