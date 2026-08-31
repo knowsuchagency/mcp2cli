@@ -1341,8 +1341,36 @@ def build_oauth_provider(
 # ---------------------------------------------------------------------------
 
 
+def _json_pointer_unescape(token: str) -> str:
+    """Decode RFC 6901 escapes: ``~1`` is ``/`` and ``~0`` is ``~``.
+
+    Order matters -- ``~1`` first, or ``~01`` would wrongly become ``/``.
+    """
+    return token.replace("~1", "/").replace("~0", "~")
+
+
+def _json_pointer_lookup(root, pointer_tokens: list[str]):
+    """Walk *root* by JSON Pointer tokens. Raises LookupError when it dangles."""
+    target = root
+    for raw in pointer_tokens:
+        token = _json_pointer_unescape(raw)
+        if isinstance(target, dict):
+            if token not in target:
+                raise LookupError(token)
+            target = target[token]
+        elif isinstance(target, list):
+            try:
+                target = target[int(token)]
+            except (ValueError, IndexError):
+                raise LookupError(token) from None
+        else:
+            raise LookupError(token)
+    return target
+
+
 def resolve_refs(spec: dict) -> dict:
     spec = copy.deepcopy(spec)
+    warned: set[str] = set()
 
     def _resolve(node, root, seen):
         if isinstance(node, dict):
@@ -1352,10 +1380,21 @@ def resolve_refs(spec: dict) -> dict:
                     return node
                 seen = seen | {ref}
                 if ref.startswith("#/"):
-                    parts = ref[2:].split("/")
-                    target = root
-                    for p in parts:
-                        target = target[p]
+                    try:
+                        target = _json_pointer_lookup(root, ref[2:].split("/"))
+                    except LookupError:
+                        # A dangling reference in a spec we did not write must
+                        # not take down the CLI. Leave the node unresolved --
+                        # the same shape external refs and cycles already
+                        # produce -- and say so once.
+                        if ref not in warned:
+                            warned.add(ref)
+                            print(
+                                f"Warning: unresolvable $ref {ref!r} in spec; "
+                                "leaving it unresolved.",
+                                file=sys.stderr,
+                            )
+                        return node
                     return _resolve(copy.deepcopy(target), root, seen)
                 return node
             return {k: _resolve(v, root, seen) for k, v in node.items()}
