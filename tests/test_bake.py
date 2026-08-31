@@ -549,3 +549,110 @@ class TestBakeInstall:
         )
         assert r.returncode == 0
         assert "may not be in your PATH" not in r.stdout
+
+
+class TestBakeRemoveWrapperSafety:
+    """`bake remove` must only delete wrappers mcp2cli itself installed."""
+
+    def _baked(self, monkeypatch, tmp_path, name, extra=None):
+        import mcp2cli
+        cfg_dir = tmp_path / "config"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(mcp2cli, "CONFIG_DIR", cfg_dir)
+        monkeypatch.setattr(mcp2cli, "BAKED_FILE", cfg_dir / "baked.json")
+        config = {"source_type": "mcp", "source": "https://example.com/mcp"}
+        config.update(extra or {})
+        mcp2cli._save_baked_all({name: config})
+        return mcp2cli
+
+    def test_foreign_file_with_the_same_name_is_left_alone(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        victim = home / ".local" / "bin" / "jq"
+        victim.write_text("#!/bin/sh\n# the user's own jq\n")
+
+        m = self._baked(monkeypatch, tmp_path, "jq")
+        m._bake_remove(["jq"])
+
+        assert victim.exists()
+        assert "the user's own jq" in victim.read_text()
+        assert m._load_baked("jq") is None
+
+    def test_wrapper_we_installed_is_removed(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_install(["mytool"])
+        wrapper = home / ".local" / "bin" / "mytool"
+        assert wrapper.exists()
+
+        m._bake_remove(["mytool"])
+        assert not wrapper.exists()
+
+    def test_wrapper_installed_with_custom_dir_is_removed(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        custom = tmp_path / "scripts"
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_install(["mytool", "--dir", str(custom)])
+        wrapper = custom / "mytool"
+        assert wrapper.exists()
+
+        m._bake_remove(["mytool"])
+        assert not wrapper.exists()
+
+    def test_custom_dir_install_does_not_touch_default_dir(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        # An unrelated binary sits at the default location under the same name.
+        decoy = home / ".local" / "bin" / "mytool"
+        decoy.write_text("#!/bin/sh\n# unrelated\n")
+
+        custom = tmp_path / "scripts"
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_install(["mytool", "--dir", str(custom)])
+        m._bake_remove(["mytool"])
+
+        assert not (custom / "mytool").exists()
+        assert decoy.exists()
+
+    def test_install_records_the_wrapper_path(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        custom = tmp_path / "scripts"
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_install(["mytool", "--dir", str(custom)])
+        assert m._load_baked("mytool")["wrapper_path"] == str(custom / "mytool")
+
+    def test_remove_succeeds_when_no_wrapper_was_installed(
+        self, monkeypatch, tmp_path
+    ):
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+        m = self._baked(monkeypatch, tmp_path, "mytool")
+        m._bake_remove(["mytool"])
+        assert m._load_baked("mytool") is None
