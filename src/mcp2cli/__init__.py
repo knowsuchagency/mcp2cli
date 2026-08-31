@@ -1424,32 +1424,75 @@ def load_openapi_spec(
 # ---------------------------------------------------------------------------
 
 
+_OPENAPI_METHODS = ("get", "post", "put", "delete", "patch")
+
+
+def _openapi_operation_name(path: str, method: str, details: dict) -> str:
+    """The natural CLI name for an operation, before collision handling."""
+    op_id = details.get("operationId")
+    if op_id:
+        return to_kebab(op_id)
+    slug = path.strip("/").replace("/", "-").replace("{", "").replace("}", "")
+    return f"{method}-{slug}" if slug else method
+
+
+def _openapi_natural_names(spec: dict) -> set[str]:
+    """Every operation's natural name, so an alias can never shadow one."""
+    names: set[str] = set()
+    for path, methods in spec.get("paths", {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, details in methods.items():
+            if method not in _OPENAPI_METHODS or not isinstance(details, dict):
+                continue
+            names.add(_openapi_operation_name(path, method, details))
+    return names
+
+
+def _unique_openapi_name(
+    name: str, method: str, reserved: set[str], used: set[str]
+) -> str:
+    """Return a free CLI name for an operation.
+
+    The first operation to claim a name keeps it. A later collision is
+    disambiguated by the HTTP method, and then by a numeric suffix if that is
+    taken too. A generated alias is never allowed to equal another
+    operation's natural name, which would make that operation unreachable.
+    """
+    if name not in used:
+        return name
+    candidate = f"{name}-{method}"
+    if candidate not in reserved and candidate not in used:
+        return candidate
+    suffix = 2
+    while True:
+        numbered = f"{candidate}-{suffix}"
+        if numbered not in reserved and numbered not in used:
+            return numbered
+        suffix += 1
+
+
 def extract_openapi_commands(spec: dict) -> list[CommandDef]:
     commands: list[CommandDef] = []
-    seen_names: dict[str, int] = {}
+    natural_names = _openapi_natural_names(spec)
+    used_names: set[str] = set()
 
     for path, methods in spec.get("paths", {}).items():
         if not isinstance(methods, dict):
             continue
         for method, details in methods.items():
-            if method not in ("get", "post", "put", "delete", "patch"):
+            if method not in _OPENAPI_METHODS:
                 continue
             if not isinstance(details, dict):
                 continue
 
-            op_id = details.get("operationId")
-            if op_id:
-                name = to_kebab(op_id)
-            else:
-                slug = (
-                    path.strip("/").replace("/", "-").replace("{", "").replace("}", "")
-                )
-                name = f"{method}-{slug}" if slug else method
-
-            if name in seen_names:
-                seen_names[name] += 1
-                name = f"{name}-{method}"
-            seen_names[name] = 1
+            name = _unique_openapi_name(
+                _openapi_operation_name(path, method, details),
+                method,
+                natural_names,
+                used_names,
+            )
+            used_names.add(name)
 
             desc = (
                 details.get("summary")
