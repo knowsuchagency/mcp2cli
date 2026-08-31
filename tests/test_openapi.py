@@ -483,3 +483,106 @@ class TestCollectMultipartParams:
         _, _, _, body, files = _collect_openapi_params(cmd, args)
         assert files is None
         assert body == {"caption": "hello"}
+
+
+def _path_level_param_spec():
+    """A path item that declares its parameters once, for every operation."""
+    return {
+        "openapi": "3.0.0",
+        "paths": {
+            "/users/{userId}": {
+                "parameters": [
+                    {
+                        "name": "userId",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                    {
+                        "name": "verbose",
+                        "in": "query",
+                        "schema": {"type": "string"},
+                    },
+                ],
+                "get": {"operationId": "getUser", "responses": {}},
+                "delete": {"operationId": "deleteUser", "responses": {}},
+            }
+        },
+    }
+
+
+class TestPathLevelParameters:
+    """OpenAPI 3.x: `parameters` on a path item apply to every operation."""
+
+    def test_inherited_by_every_operation(self):
+        cmds = extract_openapi_commands(_path_level_param_spec())
+        by_name = {c.name: c for c in cmds}
+        assert set(by_name) == {"get-user", "delete-user"}
+        for cmd in by_name.values():
+            locations = {p.original_name: p.location for p in cmd.params}
+            assert locations == {"userId": "path", "verbose": "query"}
+
+    def test_path_placeholder_is_substituted(self):
+        cmd = extract_openapi_commands(_path_level_param_spec())[0]
+        args = argparse.Namespace(user_id="u-42", verbose=None, stdin=False)
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert path == "/users/u-42"
+
+    def test_operation_level_overrides_inherited(self):
+        spec = _path_level_param_spec()
+        spec["paths"]["/users/{userId}"]["get"]["parameters"] = [
+            {
+                "name": "userId",
+                "in": "path",
+                "required": True,
+                "schema": {"type": "integer"},
+            }
+        ]
+        cmds = {c.name: c for c in extract_openapi_commands(spec)}
+        get_param = next(
+            p for p in cmds["get-user"].params if p.original_name == "userId"
+        )
+        # The operation's narrower declaration wins...
+        assert get_param.python_type is int
+        # ...while the sibling operation keeps the inherited one.
+        del_param = next(
+            p for p in cmds["delete-user"].params if p.original_name == "userId"
+        )
+        assert del_param.python_type is str
+        # An override must not drop the other inherited parameters.
+        assert {p.original_name for p in cmds["get-user"].params} == {
+            "userId",
+            "verbose",
+        }
+
+    def test_operation_level_only_still_works(self):
+        spec = {
+            "openapi": "3.0.0",
+            "paths": {
+                "/items": {
+                    "get": {
+                        "operationId": "listItems",
+                        "parameters": [
+                            {"name": "limit", "in": "query",
+                             "schema": {"type": "integer"}}
+                        ],
+                        "responses": {},
+                    }
+                }
+            },
+        }
+        cmd = extract_openapi_commands(spec)[0]
+        assert [p.original_name for p in cmd.params] == ["limit"]
+
+    def test_malformed_parameter_entries_are_skipped(self):
+        spec = {
+            "openapi": "3.0.0",
+            "paths": {
+                "/x": {
+                    "parameters": ["not-a-dict", {"no_name": True}],
+                    "get": {"operationId": "getX", "responses": {}},
+                }
+            },
+        }
+        cmd = extract_openapi_commands(spec)[0]
+        assert cmd.params == []
