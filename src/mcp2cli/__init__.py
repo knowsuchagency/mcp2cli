@@ -1424,6 +1424,29 @@ def load_openapi_spec(
 # ---------------------------------------------------------------------------
 
 
+def _merge_openapi_parameters(path_level, operation_level) -> list[dict]:
+    """Combine path-item parameters with an operation's own.
+
+    OpenAPI 3.x declares that ``parameters`` on a path item apply to every
+    operation under that path. An operation may *override* an inherited
+    parameter by redeclaring the same ``name``/``in`` pair, but it cannot
+    remove one. Operation-level entries therefore win on collision, and the
+    inherited ones are kept otherwise.
+
+    Malformed entries (non-dicts, or missing ``name``) are skipped rather
+    than raising: a spec we did not write should not crash the CLI.
+    """
+    merged: dict[tuple[str, str], dict] = {}
+    for group in (path_level, operation_level):
+        if not isinstance(group, list):
+            continue
+        for param in group:
+            if not isinstance(param, dict) or "name" not in param:
+                continue
+            merged[(param["name"], param.get("in", "query"))] = param
+    return list(merged.values())
+
+
 def extract_openapi_commands(spec: dict) -> list[CommandDef]:
     commands: list[CommandDef] = []
     seen_names: dict[str, int] = {}
@@ -1431,6 +1454,8 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
     for path, methods in spec.get("paths", {}).items():
         if not isinstance(methods, dict):
             continue
+        # Applies to every operation under this path (OpenAPI 3.x).
+        shared_params = methods.get("parameters")
         for method, details in methods.items():
             if method not in ("get", "post", "put", "delete", "patch"):
                 continue
@@ -1458,8 +1483,11 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
             )
             params: list[ParamDef] = []
 
-            # Parameters (path, query, header)
-            for param in details.get("parameters", []):
+            # Parameters (path, query, header) -- inherited from the
+            # path item, then overridden by the operation's own.
+            for param in _merge_openapi_parameters(
+                shared_params, details.get("parameters")
+            ):
                 schema = param.get("schema", {})
                 py_type, suffix = schema_type_to_python(schema)
                 p = ParamDef(
