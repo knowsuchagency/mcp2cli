@@ -2407,6 +2407,21 @@ def _bake_list() -> None:
         print(f"{name:<20} {st:<10} {src:<50}")
 
 
+def _mask_secret(value: str) -> str:
+    """Mask a secret for display.
+
+    ``env:`` and ``file:`` values are references, not secrets, and stay
+    readable so the config remains diagnosable.
+    """
+    if value.startswith("env:") or value.startswith("file:"):
+        return value
+    return value[:4] + "****" if len(value) > 4 else "****"
+
+
+# Baked-config fields whose values must never be printed in the clear.
+_SECRET_BAKE_FIELDS = ("oauth_client_secret",)
+
+
 def _bake_show(argv: list[str]) -> None:
     p = argparse.ArgumentParser(prog="mcp2cli bake show")
     p.add_argument("name")
@@ -2415,16 +2430,17 @@ def _bake_show(argv: list[str]) -> None:
     if cfg is None:
         print(f"Error: no baked tool named '{args.name}'", file=sys.stderr)
         sys.exit(1)
-    # Mask secrets in auth headers for display
+    # Mask secrets for display: auth header values and any secret-bearing
+    # top-level field (the README promises `bake show` output is safe to
+    # share).
     display = dict(cfg)
     if display.get("auth_headers"):
-        masked = []
-        for name, val in display["auth_headers"]:
-            if val.startswith("env:") or val.startswith("file:"):
-                masked.append([name, val])
-            else:
-                masked.append([name, val[:4] + "****" if len(val) > 4 else "****"])
-        display["auth_headers"] = masked
+        display["auth_headers"] = [
+            [name, _mask_secret(val)] for name, val in display["auth_headers"]
+        ]
+    for field in _SECRET_BAKE_FIELDS:
+        if display.get(field):
+            display[field] = _mask_secret(display[field])
     print(json.dumps(display, indent=2, ensure_ascii=False))
 
 

@@ -549,3 +549,47 @@ class TestBakeInstall:
         )
         assert r.returncode == 0
         assert "may not be in your PATH" not in r.stdout
+
+
+class TestShowMasksOAuthSecret:
+    """`bake show` must never print oauth_client_secret in the clear."""
+
+    def _create(self, cfg_dir, cache_dir, name, secret):
+        r = _run(
+            "bake", "create", name,
+            "--spec", "https://api.example.com/openapi.json",
+            "--oauth-client-id", "my-client-id",
+            "--oauth-client-secret", secret,
+            config_dir=cfg_dir, cache_dir=cache_dir,
+        )
+        assert r.returncode == 0, r.stderr
+
+    def test_literal_secret_is_masked(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(cfg_dir, cache_dir, "mask-lit", "sk-super-secret-value")
+        r = _run("bake", "show", "mask-lit", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert r.returncode == 0, r.stderr
+        assert "sk-super-secret-value" not in r.stdout
+        cfg = json.loads(r.stdout)
+        assert cfg["oauth_client_secret"] == "sk-s****"
+        # The client id is not a secret and stays diagnosable.
+        assert cfg["oauth_client_id"] == "my-client-id"
+
+    def test_short_secret_fully_masked(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(cfg_dir, cache_dir, "mask-short", "abcd")
+        r = _run("bake", "show", "mask-short", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert json.loads(r.stdout)["oauth_client_secret"] == "****"
+
+    def test_env_reference_stays_readable(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(cfg_dir, cache_dir, "mask-env", "env:OAUTH_SECRET")
+        r = _run("bake", "show", "mask-env", config_dir=cfg_dir, cache_dir=cache_dir)
+        assert json.loads(r.stdout)["oauth_client_secret"] == "env:OAUTH_SECRET"
+
+    def test_stored_config_is_untouched(self, tmp_path):
+        cfg_dir, cache_dir = tmp_path / "config", tmp_path / "cache"
+        self._create(cfg_dir, cache_dir, "mask-store", "sk-super-secret-value")
+        _run("bake", "show", "mask-store", config_dir=cfg_dir, cache_dir=cache_dir)
+        stored = json.loads((cfg_dir / "baked.json").read_text())
+        assert stored["mask-store"]["oauth_client_secret"] == "sk-super-secret-value"
