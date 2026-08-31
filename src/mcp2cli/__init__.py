@@ -1883,6 +1883,29 @@ def _build_graphql_param(arg: dict, types_by_name: dict) -> ParamDef:
     )
 
 
+def _unique_graphql_name(
+    name: str, op_type: str, reserved: set[str], used: set[str]
+) -> str:
+    """Return a free CLI name for a GraphQL field.
+
+    The first field to claim a name keeps it. A later collision is
+    disambiguated by the operation type, then by a numeric suffix if that is
+    taken too. A generated alias is never allowed to equal another field's
+    own name, which would make that field unreachable.
+    """
+    if name not in used:
+        return name
+    candidate = f"{op_type}-{name}"
+    if candidate not in reserved and candidate not in used:
+        return candidate
+    suffix = 2
+    while True:
+        numbered = f"{candidate}-{suffix}"
+        if numbered not in reserved and numbered not in used:
+            return numbered
+        suffix += 1
+
+
 def extract_graphql_commands(schema: dict) -> list[CommandDef]:
     """Convert introspection schema into CommandDef list."""
     types_by_name = {t["name"]: t for t in schema.get("types", []) if t.get("name")}
@@ -1891,46 +1914,52 @@ def extract_graphql_commands(schema: dict) -> list[CommandDef]:
     mutation_type_name = (schema.get("mutationType") or {}).get("name")
 
     commands: list[CommandDef] = []
-    seen_names: set[str] = set()
 
     query_fields = types_by_name.get(query_type_name, {}).get("fields", []) if query_type_name else []
     mutation_fields = types_by_name.get(mutation_type_name, {}).get("fields", []) if mutation_type_name else []
     collisions = _detect_field_collisions(query_fields, mutation_fields)
 
-    for op_type, type_name, fields in [
-        ("query", query_type_name, query_fields),
-        ("mutation", mutation_type_name, mutation_fields),
-    ]:
+    # Pass 1: every field's natural CLI name. A field whose *wire* name exists
+    # under both Query and Mutation is prefixed with its operation type on both
+    # sides, which is the pre-existing symmetric naming and is kept as-is.
+    entries: list[tuple[str, str, dict]] = []
+    for op_type, fields in (("query", query_fields), ("mutation", mutation_fields)):
         for field_def in fields:
             field_name = field_def["name"]
             if field_name.startswith("__"):
                 continue
-
-            cli_name = to_kebab(field_name)
+            base = to_kebab(field_name)
             if field_name in collisions:
-                cli_name = f"{op_type}-{cli_name}"
+                base = f"{op_type}-{base}"
+            entries.append((base, op_type, field_def))
 
-            if cli_name in seen_names:
-                cli_name = f"{op_type}-{cli_name}"
-            seen_names.add(cli_name)
+    # Pass 2: allocate against the complete set of natural names, so a
+    # generated alias can never shadow a field that owns that name.
+    reserved = {base for base, _, _ in entries}
+    used: set[str] = set()
 
-            desc = field_def.get("description") or f"{op_type} {field_name}"
-            params = [
-                _build_graphql_param(arg, types_by_name)
-                for arg in field_def.get("args", [])
-            ]
+    for base, op_type, field_def in entries:
+        field_name = field_def["name"]
+        cli_name = _unique_graphql_name(base, op_type, reserved, used)
+        used.add(cli_name)
 
-            commands.append(
-                CommandDef(
-                    name=cli_name,
-                    description=desc,
-                    params=params,
-                    has_body=bool(params),
-                    graphql_operation_type=op_type,
-                    graphql_field_name=field_name,
-                    graphql_return_type=field_def.get("type"),
-                )
+        desc = field_def.get("description") or f"{op_type} {field_name}"
+        params = [
+            _build_graphql_param(arg, types_by_name)
+            for arg in field_def.get("args", [])
+        ]
+
+        commands.append(
+            CommandDef(
+                name=cli_name,
+                description=desc,
+                params=params,
+                has_body=bool(params),
+                graphql_operation_type=op_type,
+                graphql_field_name=field_name,
+                graphql_return_type=field_def.get("type"),
             )
+        )
 
     return commands
 
