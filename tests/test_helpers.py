@@ -810,3 +810,68 @@ class TestExtractContentParts:
             {"type": "resource_link", "uri": "probe://linked", "name": "linked-doc"},
         ]
         assert _extract_content_parts(blocks) == "see:\nlinked-doc: probe://linked"
+
+
+class TestResolveRefsRobustness:
+    """A spec we did not write must not crash ref resolution."""
+
+    def test_dangling_ref_does_not_raise(self, capsys):
+        spec = {
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [
+                            {"$ref": "#/components/parameters/Missing"}
+                        ]
+                    }
+                }
+            },
+        }
+        resolved = resolve_refs(spec)
+        # Left unresolved -- the same shape a cycle or external ref produces.
+        assert resolved["paths"]["/x"]["get"]["parameters"][0] == {
+            "$ref": "#/components/parameters/Missing"
+        }
+        err = capsys.readouterr().err
+        assert "unresolvable $ref" in err
+        assert "#/components/parameters/Missing" in err
+
+    def test_dangling_ref_warns_once(self, capsys):
+        ref = {"$ref": "#/nope"}
+        spec = {"paths": {"/a": {"get": {"x": dict(ref)}},
+                          "/b": {"get": {"x": dict(ref)}}}}
+        resolve_refs(spec)
+        assert capsys.readouterr().err.count("unresolvable $ref") == 1
+
+    def test_json_pointer_escapes_are_decoded(self):
+        # RFC 6901: ~1 -> /  and  ~0 -> ~
+        spec = {
+            "components": {"a/b": {"c~d": {"type": "integer"}}},
+            "paths": {
+                "/x": {
+                    "get": {
+                        "schema": {"$ref": "#/components/a~1b/c~0d"}
+                    }
+                }
+            },
+        }
+        resolved = resolve_refs(spec)
+        assert resolved["paths"]["/x"]["get"]["schema"] == {"type": "integer"}
+
+    def test_array_index_tokens(self):
+        spec = {
+            "shared": [{"type": "string"}, {"type": "integer"}],
+            "paths": {
+                "/x": {"get": {"schema": {"$ref": "#/shared/1"}}}
+            },
+        }
+        resolved = resolve_refs(spec)
+        assert resolved["paths"]["/x"]["get"]["schema"] == {"type": "integer"}
+
+    def test_ref_through_non_container_is_unresolved(self):
+        spec = {
+            "leaf": 42,
+            "paths": {"/x": {"get": {"schema": {"$ref": "#/leaf/deeper"}}}},
+        }
+        resolved = resolve_refs(spec)
+        assert resolved["paths"]["/x"]["get"]["schema"] == {"$ref": "#/leaf/deeper"}
