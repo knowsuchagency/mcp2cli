@@ -257,8 +257,8 @@ Save connection settings as named configurations to avoid repeating flags:
 mcp2cli bake create petstore --spec https://api.example.com/spec.json \
   --exclude "delete-*,update-*" --methods GET,POST --cache-ttl 7200
 
-mcp2cli bake create mygit --mcp-stdio "npx @mcp/github" \
-  --include "search-*,list-*" --exclude "delete-*"
+mcp2cli bake create myfs --mcp-stdio "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+  --include "search-*,list-*" --exclude "list-allowed-*"
 
 # Use with @ prefix
 mcp2cli @petstore --list
