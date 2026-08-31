@@ -2733,7 +2733,11 @@ def _collect_openapi_params(
                     if val is not None:
                         extra_headers[p.original_name] = str(val)
                     continue
-                if p.location == "path":
+                if p.location in ("path", "query", "cookie"):
+                    # Path and query values travel in the URL, and a cookie
+                    # parameter is not a body field either. None of them
+                    # belong in the JSON payload. Query values are collected
+                    # separately below.
                     continue
                 if p.location == "file":
                     if val is not None:

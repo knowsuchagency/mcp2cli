@@ -483,3 +483,107 @@ class TestCollectMultipartParams:
         _, _, _, body, files = _collect_openapi_params(cmd, args)
         assert files is None
         assert body == {"caption": "hello"}
+
+
+def _mixed_location_spec(method="post"):
+    """An operation carrying query, header, path and body parameters at once."""
+    return {
+        "openapi": "3.0.0",
+        "paths": {
+            "/tenants/{tenantId}/items": {
+                method: {
+                    "operationId": "createItem",
+                    "parameters": [
+                        {"name": "tenantId", "in": "path", "required": True,
+                         "schema": {"type": "string"}},
+                        {"name": "dryRun", "in": "query",
+                         "schema": {"type": "string"}},
+                        {"name": "region", "in": "query",
+                         "schema": {"type": "string"}},
+                        {"name": "X-Trace", "in": "header",
+                         "schema": {"type": "string"}},
+                    ],
+                    "requestBody": {"content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "qty": {"type": "integer"},
+                        },
+                    }}}},
+                    "responses": {},
+                }
+            }
+        },
+    }
+
+
+class TestQueryParamsStayOutOfBody:
+    """Query parameters belong in the URL, never duplicated into the body."""
+
+    def test_query_param_not_copied_into_json_body(self):
+        cmd = extract_openapi_commands(_mixed_location_spec())[0]
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run=None, region="eu", x_trace=None,
+            name="widget", qty=3, stdin=False,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body == {"name": "widget", "qty": 3}
+        assert query == {"region": "eu"}
+        assert path == "/tenants/acme/items"
+
+    def test_header_and_path_still_excluded_from_body(self):
+        cmd = extract_openapi_commands(_mixed_location_spec())[0]
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run="yes", region=None, x_trace="abc123",
+            name="widget", qty=None, stdin=False,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body == {"name": "widget"}
+        assert headers == {"X-Trace": "abc123"}
+        assert query == {"dryRun": "yes"}
+        assert "tenantId" not in body
+
+    def test_body_becomes_none_when_only_query_supplied(self):
+        cmd = extract_openapi_commands(_mixed_location_spec())[0]
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run=None, region="eu", x_trace=None,
+            name=None, qty=None, stdin=False,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body is None
+        assert query == {"region": "eu"}
+
+    def test_query_still_collected_with_stdin_body(self, monkeypatch):
+        import io
+        cmd = extract_openapi_commands(_mixed_location_spec())[0]
+        monkeypatch.setattr(sys, "stdin", io.StringIO('{"name": "from-stdin"}'))
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run=None, region="eu", x_trace=None,
+            name=None, qty=None, stdin=True,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body == {"name": "from-stdin"}
+        assert query == {"region": "eu"}
+
+    def test_delete_verb_behaves_the_same(self):
+        cmd = extract_openapi_commands(_mixed_location_spec("delete"))[0]
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run=None, region="eu", x_trace=None,
+            name="widget", qty=None, stdin=False,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body == {"name": "widget"}
+        assert query == {"region": "eu"}
+
+    def test_get_verb_unaffected(self):
+        spec = _mixed_location_spec("get")
+        cmd = extract_openapi_commands(spec)[0]
+        args = argparse.Namespace(
+            tenant_id="acme", dry_run=None, region="eu", x_trace=None,
+            name=None, qty=None, stdin=False,
+        )
+        path, query, headers, body, files = _collect_openapi_params(cmd, args)
+        assert body is None
+        assert query == {"region": "eu"}
+        assert path == "/tenants/acme/items"
