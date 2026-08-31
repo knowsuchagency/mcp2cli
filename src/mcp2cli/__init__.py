@@ -632,18 +632,48 @@ def cache_key_for(config: dict) -> str:
     ).hexdigest()[:16]
 
 def load_cached(key: str, ttl: int) -> dict | None:
+    """Read a cache entry, or None when it is missing, stale or unusable.
+
+    A corrupt entry is treated as a miss rather than an error. The cache is
+    an optimisation, so a bad file should cost one refetch -- not every
+    later invocation, until someone works out which file to delete by hand.
+    This matches _load_usage() and _load_baked_all(), which already tolerate
+    exactly this.
+    """
     path = CACHE_DIR / f"{key}.json"
     if not path.exists():
         return None
-    age = time.time() - path.stat().st_mtime
-    if age >= ttl:
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age >= ttl:
+            return None
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
-    return json.loads(path.read_text())
 
 
 def save_cache(key: str, data: dict):
+    """Write a cache entry atomically.
+
+    A plain write_text() is not atomic: an interrupt, a full disk or two
+    concurrent mcp2cli runs can leave a half-written file behind, which is
+    how a cache entry becomes corrupt in the first place. Serialise first,
+    write to a private temp file in the same directory, then os.replace()
+    it into place -- readers only ever observe the old file or the new one.
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (CACHE_DIR / f"{key}.json").write_text(json.dumps(data))
+    path = CACHE_DIR / f"{key}.json"
+    payload = json.dumps(data)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(payload)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------

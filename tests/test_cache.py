@@ -273,3 +273,64 @@ class TestMCPStdioCaching:
         r = self._run_mcp("--cache-ttl", "1", "echo", "--message", "refreshed", cache_dir=cd)
         assert r.returncode == 0
         assert "refreshed" in r.stdout
+
+
+class TestCacheCorruptionResilience:
+    """A damaged cache entry must cost one refetch, not every later run."""
+
+    def _isolate(self, monkeypatch, tmp_path):
+        import mcp2cli
+        monkeypatch.setattr(mcp2cli, "CACHE_DIR", tmp_path)
+        return mcp2cli
+
+    def test_truncated_entry_is_treated_as_a_miss(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "abc.json").write_text('{"paths": {"/a"')
+        assert m.load_cached("abc", 3600) is None
+
+    def test_empty_entry_is_treated_as_a_miss(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "abc.json").write_text("")
+        assert m.load_cached("abc", 3600) is None
+
+    def test_non_utf8_entry_is_treated_as_a_miss(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "abc.json").write_bytes(b"\xff\xfe\x00garbage")
+        assert m.load_cached("abc", 3600) is None
+
+    def test_corrupt_entry_is_overwritten_by_the_next_save(
+        self, monkeypatch, tmp_path
+    ):
+        m = self._isolate(monkeypatch, tmp_path)
+        (tmp_path / "abc.json").write_text("not json at all")
+        assert m.load_cached("abc", 3600) is None
+        m.save_cache("abc", {"paths": {"/pets": {}}})
+        assert m.load_cached("abc", 3600) == {"paths": {"/pets": {}}}
+
+    def test_valid_entry_still_round_trips(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"hello": "world"})
+        assert m.load_cached("abc", 3600) == {"hello": "world"}
+
+    def test_expiry_still_honoured(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"hello": "world"})
+        assert m.load_cached("abc", 0) is None
+
+    def test_save_leaves_no_temp_files_behind(self, monkeypatch, tmp_path):
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"hello": "world"})
+        assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]
+
+    def test_failed_serialisation_leaves_previous_entry_intact(
+        self, monkeypatch, tmp_path
+    ):
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"good": True})
+        # Serialisation happens before the file is touched, so an
+        # unserialisable payload cannot destroy the entry that is already
+        # on disk.
+        with pytest.raises(TypeError):
+            m.save_cache("abc", {"bad": object()})
+        assert m.load_cached("abc", 3600) == {"good": True}
+        assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]
