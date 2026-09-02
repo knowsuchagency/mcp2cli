@@ -414,17 +414,20 @@ async def _list_tools_page(session, cursor: str | None):
     return await session.list_tools(params=params)
 
 
-def _authorization_code_result(code: str, state: str | None):
+def _authorization_code_result(code: str, state: str | None, iss: str | None = None):
     """Wrap a callback result in whatever ``callback_handler`` must return.
 
     v1 expects a plain ``(code, state)`` tuple; v2 expects an
-    ``AuthorizationCodeResult`` model.
+    ``AuthorizationCodeResult`` model. ``iss`` is the RFC 9207
+    authorization-response issuer: when the authorization server advertises it
+    in its metadata, the SDK validates the redirect's ``iss`` and fails the
+    flow if the value never reaches it.
     """
     try:
         from mcp.shared.auth import AuthorizationCodeResult
     except ImportError:
         return (code, state)
-    return AuthorizationCodeResult(code=code, state=state)
+    return AuthorizationCodeResult(code=code, state=state, iss=iss)
 
 
 def _ensure_utf8_output() -> None:
@@ -849,6 +852,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
         elif "code" in params:
             _CallbackHandler.auth_code = params["code"][0]
             _CallbackHandler.state = params.get("state", [None])[0]
+            _CallbackHandler.iss = params.get("iss", [None])[0]
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -875,17 +879,22 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def _parse_oauth_callback_input(text: str) -> tuple[str, str]:
-    """Extract ``(code, state)`` from a pasted OAuth callback URL.
+def _parse_oauth_callback_input(text: str) -> tuple[str, str, str | None]:
+    """Extract ``(code, state, iss)`` from a pasted OAuth callback URL.
 
     Accepts the full redirect target the browser landed on
     (``http://127.0.0.1:1234/callback?code=...&state=...``) or just its query
     string. PKCE and CSRF verification stay in the MCP SDK -- we only hand it
-    the two values it asks for. The SDK compares ``state`` against the one it
+    the values it asks for. The SDK compares ``state`` against the one it
     generated with ``secrets.compare_digest`` and treats ``None`` as a
     mismatch, so a paste missing ``state`` is rejected here with a readable
     message instead of surfacing as an opaque
     ``State parameter mismatch: None != ...``.
+
+    ``iss`` is optional in the redirect but mandatory to forward: under
+    RFC 9207 the SDK validates it whenever the authorization server advertises
+    it, and dropping it fails the flow with "Authorization response missing
+    iss parameter advertised by the authorization server".
     """
     text = text.strip().strip("'\"")
     if not text:
@@ -905,10 +914,10 @@ def _parse_oauth_callback_input(text: str) -> tuple[str, str]:
             "That URL has no 'state' parameter. Paste the URL unmodified -- "
             "the MCP SDK verifies state to prevent CSRF and rejects a missing one."
         )
-    return params["code"][0], params["state"][0]
+    return params["code"][0], params["state"][0], params.get("iss", [None])[0]
 
 
-def _prompt_oauth_callback(attempts: int = 3) -> tuple[str, str]:
+def _prompt_oauth_callback(attempts: int = 3) -> tuple[str, str, str | None]:
     """Read the OAuth callback URL from stdin.
 
     For hosts with no reachable browser -- a VPS over SSH, a container.
@@ -1286,12 +1295,13 @@ def build_oauth_provider(
             )
 
         async def callback_handler():
-            code, state = await anyio.to_thread.run_sync(_prompt_oauth_callback)
-            return _authorization_code_result(code, state)
+            code, state, iss = await anyio.to_thread.run_sync(_prompt_oauth_callback)
+            return _authorization_code_result(code, state, iss)
     else:
         # Reset callback handler state
         _CallbackHandler.auth_code = None
         _CallbackHandler.state = None
+        _CallbackHandler.iss = None
         _CallbackHandler.error = None
         _CallbackHandler.done = threading.Event()
 
@@ -1324,7 +1334,9 @@ def build_oauth_provider(
             if not _CallbackHandler.auth_code:
                 raise RuntimeError("No authorization code received")
             return _authorization_code_result(
-                _CallbackHandler.auth_code, _CallbackHandler.state
+                _CallbackHandler.auth_code,
+                _CallbackHandler.state,
+                getattr(_CallbackHandler, "iss", None),
             )
 
     return _RobustOAuthClientProvider(
