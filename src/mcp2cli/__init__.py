@@ -3507,17 +3507,27 @@ def session_start(
     )
 
     log_path = _session_log_path(name)
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            f"import mcp2cli; mcp2cli._run_session_daemon({json.dumps(daemon_script)})",
-        ],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=open(log_path, "a"),
-        stdin=subprocess.DEVNULL,
-    )
+    # Route both streams to the session log rather than /dev/null: sandboxes
+    # that deny opening /dev/null (agent runners, hardened containers) would
+    # otherwise fail the spawn with PermissionError before the daemon starts.
+    # stdin is a closed pipe for the same reason -- the daemon never reads it.
+    log_file = open(log_path, "a")
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                f"import mcp2cli; mcp2cli._run_session_daemon({json.dumps(daemon_script)})",
+            ],
+            start_new_session=True,
+            stdout=log_file,
+            stderr=log_file,
+            stdin=subprocess.PIPE,
+        )
+    finally:
+        log_file.close()
+    if proc.stdin is not None:
+        proc.stdin.close()
 
     # Wait for socket to appear
     sock_path = _session_sock_path(name)
