@@ -29,6 +29,11 @@ def _code_state(result):
     return (result.code, result.state)
 
 
+def _result_iss(result):
+    """The RFC 9207 issuer a callback_handler forwarded, if the SDK carries it."""
+    return None if isinstance(result, tuple) else getattr(result, "iss", None)
+
+
 class TestResolveSecret:
     """Tests for resolve_secret helper."""
 
@@ -1006,29 +1011,39 @@ class TestParseOAuthCallbackInput:
     """Tests for parsing a pasted OAuth callback URL (issue #71)."""
 
     def test_full_url(self):
-        code, state = mcp2cli._parse_oauth_callback_input(
+        code, state, iss = mcp2cli._parse_oauth_callback_input(
             "http://127.0.0.1:5311/callback?code=abc123&state=xyz789"
         )
-        assert (code, state) == ("abc123", "xyz789")
+        assert (code, state, iss) == ("abc123", "xyz789", None)
 
     def test_query_string_only(self):
         """A user who copied only the query part still gets through."""
         assert mcp2cli._parse_oauth_callback_input("code=abc&state=xyz") == (
             "abc",
             "xyz",
+            None,
         )
 
     def test_strips_surrounding_whitespace_and_quotes(self):
-        code, state = mcp2cli._parse_oauth_callback_input(
+        code, state, _ = mcp2cli._parse_oauth_callback_input(
             '  "http://127.0.0.1:1/callback?code=a&state=b"\n'
         )
         assert (code, state) == ("a", "b")
 
     def test_percent_encoded_code_is_decoded(self):
-        code, _ = mcp2cli._parse_oauth_callback_input(
+        code, _, _ = mcp2cli._parse_oauth_callback_input(
             "http://127.0.0.1:1/callback?code=a%2Fb%3Dc&state=s"
         )
         assert code == "a/b=c"
+
+    def test_iss_is_extracted_and_decoded(self):
+        """RFC 9207: the SDK validates iss when the server advertises it, so a
+        dropped iss fails the flow with 'Authorization response missing iss'."""
+        code, state, iss = mcp2cli._parse_oauth_callback_input(
+            "http://127.0.0.1:1/callback?code=a&state=b"
+            "&iss=https%3A%2F%2Fclerk.example.com"
+        )
+        assert (code, state, iss) == ("a", "b", "https://clerk.example.com")
 
     def test_error_redirect_raises_with_description(self):
         with pytest.raises(RuntimeError, match=r"access_denied \(user said no\)"):
@@ -1059,7 +1074,7 @@ class TestPromptOAuthCallback:
         monkeypatch.setattr(
             sys, "stdin", io.StringIO("http://127.0.0.1:1/callback?code=c1&state=s1\n")
         )
-        assert mcp2cli._prompt_oauth_callback() == ("c1", "s1")
+        assert mcp2cli._prompt_oauth_callback() == ("c1", "s1", None)
         assert "Paste the full callback URL" in capsys.readouterr().err
 
     def test_reprompts_after_malformed_paste(self, monkeypatch, capsys):
@@ -1069,7 +1084,7 @@ class TestPromptOAuthCallback:
             "stdin",
             io.StringIO("not-a-url\nhttp://127.0.0.1:1/callback?code=c2&state=s2\n"),
         )
-        assert mcp2cli._prompt_oauth_callback() == ("c2", "s2")
+        assert mcp2cli._prompt_oauth_callback() == ("c2", "s2", None)
         assert "attempt(s) left" in capsys.readouterr().err
 
     def test_gives_up_after_exhausting_attempts(self, monkeypatch):
@@ -1139,6 +1154,29 @@ class TestManualCallbackProvider:
             sys, "stdin", io.StringIO("http://127.0.0.1:1/callback?code=zz&state=yy\n")
         )
         assert _code_state(anyio.run(provider.context.callback_handler)) == ("zz", "yy")
+
+    def test_manual_callback_handler_forwards_iss(self, tmp_path, monkeypatch):
+        """Servers that send iss (RFC 9207) fail the token exchange unless the
+        handler forwards it to the SDK."""
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider(
+            "https://example.com/mcp", manual_callback=True
+        )
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.StringIO(
+                "http://127.0.0.1:1/callback?code=zz&state=yy"
+                "&iss=https%3A%2F%2Fissuer.example.com\n"
+            ),
+        )
+        result = anyio.run(provider.context.callback_handler)
+
+        assert _code_state(result) == ("zz", "yy")
+        if not isinstance(result, tuple):
+            assert _result_iss(result) == "https://issuer.example.com"
 
     def test_manual_redirect_handler_prints_url_and_skips_browser(
         self, tmp_path, monkeypatch, capsys
