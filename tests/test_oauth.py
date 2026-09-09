@@ -18,6 +18,23 @@ def _sdk_httpx():
     return getattr(_httpx_utils, "httpx2", None) or _httpx_utils.httpx
 
 
+def _token_endpoint_response(status_code, body=b""):
+    """A real response of the httpx flavour the installed SDK reads.
+
+    The SDK's refresh handling does more than look at ``status_code`` and
+    ``aread()``: its log line appends ``redirect_note(response)``, which
+    reaches for ``response.next_request``. A two-attribute stub therefore
+    raises AttributeError on every SDK carrying that diagnostic, so hand the
+    provider the type it actually expects.
+    """
+    httpx = _sdk_httpx()
+    return httpx.Response(
+        status_code,
+        content=body,
+        request=httpx.Request("POST", "https://example.com/oauth/token"),
+    )
+
+
 def _code_state(result):
     """Normalize a callback_handler result across SDK majors.
 
@@ -197,7 +214,15 @@ class TestFileTokenStorage:
 
 
 class TestRobustOAuthClientProvider:
-    """Behavior of the _RobustOAuthClientProvider subclass (issue #50)."""
+    """Behavior of the _RobustOAuthClientProvider subclass (issue #50).
+
+    These tests drive ``_initialize`` and ``_handle_refresh_response`` only, so
+    they build the provider with ``manual_callback=True``: the default flow
+    binds its loopback listener in ``build_oauth_provider`` and only closes it
+    once a callback is served, which leaks a bound port for the rest of the
+    session (and made these fixed ports collide once a failing test kept the
+    provider alive in its traceback).
+    """
 
     def test_initialize_restores_token_expiry_from_sidecar(self, tmp_path, monkeypatch):
         """A fresh process restoring tokens picks up the persisted expiry,
@@ -229,6 +254,7 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19881/callback",
+            manual_callback=True,
         )
 
         async def _drive():
@@ -265,6 +291,7 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19882/callback",
+            manual_callback=True,
         )
 
         async def _drive():
@@ -297,20 +324,18 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19883/callback",
+            manual_callback=True,
         )
 
-        # Build a synthetic failed refresh response
-        class _FakeResponse:
-            status_code = 400
-            async def aread(self):
-                return b'{"error":"invalid_grant"}'
+        # A definitive rejection from the token endpoint.
+        response = _token_endpoint_response(400, b'{"error":"invalid_grant"}')
 
         async def _drive():
             await provider._initialize()
             provider.context.client_info = await storage.get_client_info()
             assert provider.context.client_info is not None
 
-            ok = await provider._handle_refresh_response(_FakeResponse())
+            ok = await provider._handle_refresh_response(response)
             assert ok is False
             # In-memory and on-disk client_info both cleared
             assert provider.context.client_info is None
@@ -352,19 +377,17 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19883/callback",
+            manual_callback=True,
         )
 
         # A 503 from the token endpoint — transient, recoverable on retry.
-        class _FakeResponse:
-            status_code = 503
-            async def aread(self):
-                return b"<html>Service Unavailable</html>"
+        response = _token_endpoint_response(503, b"<html>Service Unavailable</html>")
 
         async def _drive():
             await provider._initialize()
             provider.context.client_info = await storage.get_client_info()
 
-            ok = await provider._handle_refresh_response(_FakeResponse())
+            ok = await provider._handle_refresh_response(response)
             assert ok is False
             # Persisted OAuth state survives so a later run can refresh again.
             assert provider.context.client_info is not None
@@ -395,18 +418,16 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19883/callback",
+            manual_callback=True,
         )
 
-        class _FakeResponse:
-            status_code = 401
-            async def aread(self):
-                return b""
+        response = _token_endpoint_response(401)
 
         async def _drive():
             await provider._initialize()
             provider.context.client_info = await storage.get_client_info()
 
-            ok = await provider._handle_refresh_response(_FakeResponse())
+            ok = await provider._handle_refresh_response(response)
             assert ok is False
             assert provider.context.client_info is None
             assert not storage._client_path.exists()
@@ -438,17 +459,18 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19884/callback",
+            manual_callback=True,
         )
 
         # Refresh response that rotates the access token but omits refresh_token
-        class _FakeResponse:
-            status_code = 200
-            async def aread(self):
-                return b'{"access_token":"new-access","token_type":"Bearer","expires_in":3600}'
+        response = _token_endpoint_response(
+            200,
+            b'{"access_token":"new-access","token_type":"Bearer","expires_in":3600}',
+        )
 
         async def _drive():
             await provider._initialize()
-            ok = await provider._handle_refresh_response(_FakeResponse())
+            ok = await provider._handle_refresh_response(response)
             assert ok is True
             # Old refresh token carried forward in memory …
             assert provider.context.current_tokens.access_token == "new-access"
@@ -483,19 +505,18 @@ class TestRobustOAuthClientProvider:
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri="http://localhost:19885/callback",
+            manual_callback=True,
         )
 
-        class _FakeResponse:
-            status_code = 200
-            async def aread(self):
-                return (
-                    b'{"access_token":"new-access","token_type":"Bearer",'
-                    b'"refresh_token":"new-refresh","expires_in":3600}'
-                )
+        response = _token_endpoint_response(
+            200,
+            b'{"access_token":"new-access","token_type":"Bearer",'
+            b'"refresh_token":"new-refresh","expires_in":3600}',
+        )
 
         async def _drive():
             await provider._initialize()
-            ok = await provider._handle_refresh_response(_FakeResponse())
+            ok = await provider._handle_refresh_response(response)
             assert ok is True
             assert provider.context.current_tokens.refresh_token == "new-refresh"
 
