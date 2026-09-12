@@ -195,7 +195,7 @@ mcp2cli --graphql https://api.example.com/graphql users --limit 10
 mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --email "alice@example.com"
 
 # Override auto-generated selection set fields
-mcp2cli --graphql https://api.example.com/graphql users --fields "id name email"
+mcp2cli --graphql https://api.example.com/graphql --fields "id name email" users
 
 # With auth
 mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:Bearer tok_..." users
@@ -300,7 +300,7 @@ mcp2cli --spec ./spec.json --pretty list-pets
 mcp2cli --spec ./spec.json --raw get-data
 
 # Truncate large responses to first N records
-mcp2cli --spec ./spec.json list-records --head 5
+mcp2cli --spec ./spec.json --head 5 list-records
 
 # Pipe-friendly (compact JSON when not a TTY)
 mcp2cli --spec ./spec.json list-pets | jq '.[] | .name'
