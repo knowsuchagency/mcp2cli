@@ -96,6 +96,15 @@ Bake mode:
 
 Subcommands and flags are generated dynamically from the source.
 
+**Global options go BEFORE the subcommand.** Argument parsing stops at the first
+non-flag token, so everything after the subcommand name belongs to that command — a
+tool may legitimately have its own `--pretty` or `--head`.
+
+```bash
+mcp2cli --spec ./spec.json --pretty list-pets    # works
+mcp2cli --spec ./spec.json list-pets --pretty    # error: unrecognized arguments: --pretty
+```
+
 ## Patterns
 
 ### Authentication
@@ -155,7 +164,7 @@ mcp2cli --graphql https://api.example.com/graphql users --limit 10
 mcp2cli --graphql https://api.example.com/graphql create-user --name "Alice" --email "alice@example.com"
 
 # Override auto-generated selection set
-mcp2cli --graphql https://api.example.com/graphql users --fields "id name email"
+mcp2cli --graphql https://api.example.com/graphql --fields "id name email" users
 
 # With auth
 mcp2cli --graphql https://api.example.com/graphql --auth-header "Authorization:env:API_TOKEN" users
@@ -269,7 +278,7 @@ Best for large uniform arrays — 40-60% fewer tokens than JSON.
 
 ```bash
 # Preview first 3 records from a potentially huge dataset
-mcp2cli --spec ./spec.json list-records --head 3 --pretty
+mcp2cli --spec ./spec.json --head 3 --pretty list-records
 ```
 
 `--head N` slices JSON arrays to the first N elements. Useful for datasets with oversized fields (e.g. geo_shape polygons at ~200KB per record).
@@ -337,7 +346,7 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    # Get help for a command
    ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --help
    # Run a command
-   ${CLAUDE_SKILL_DIR}/scripts/myapi <command> --param value --pretty
+   ${CLAUDE_SKILL_DIR}/scripts/myapi --pretty <command> --param value
    ```
 
    **Before Querying** checklist — include a decision framework:
@@ -356,9 +365,9 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    **Output Processing** — use `--pretty` for readable JSON, `--head` to limit results, or pipe to `jq` for filtering:
    ```bash
    # Pretty-print results
-   ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --pretty
+   ${CLAUDE_SKILL_DIR}/scripts/myapi --pretty list-records
    # Limit large datasets
-   ${CLAUDE_SKILL_DIR}/scripts/myapi list-records --head 5
+   ${CLAUDE_SKILL_DIR}/scripts/myapi --head 5 list-records
    # Filter with jq (pipe)
    ${CLAUDE_SKILL_DIR}/scripts/myapi list-records | jq '.[].name'
    ```
@@ -366,7 +375,7 @@ When the user asks to create a skill from an MCP server, OpenAPI spec, or GraphQ
    **Export Formats** (if the API supports multiple output types):
    - List supported formats (JSON, CSV, xlsx, parquet, etc.)
    - Note which are text-safe vs binary
-   - For binary formats: `${CLAUDE_SKILL_DIR}/scripts/myapi export --format xlsx --raw > output.xlsx`
+   - For binary formats: `${CLAUDE_SKILL_DIR}/scripts/myapi --raw export --format xlsx > output.xlsx`
 
    **Knowledge Delta Principle:** Do not duplicate parameter listings from `--help`. Instead, document which parameters actually matter for common tasks, default behaviors that are surprising, combinations that don't work, and rate limits or response size limits.
 
