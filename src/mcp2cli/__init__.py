@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from datetime import datetime, timezone
 
@@ -65,6 +65,8 @@ class ParamDef:
     location: str = "body"  # path|query|header|body|tool_input
     schema: dict = field(default_factory=dict)
     cli_name: str | None = None  # collision-free argparse flag name
+    style: str | None = None  # OpenAPI parameter serialization
+    explode: bool = False
 
 
 @dataclass
@@ -1679,6 +1681,8 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                     choices=schema.get("enum"),
                     location=param.get("in", "query"),
                     schema=schema,
+                    style=param.get("style"),
+                    explode=param.get("explode", False),
                 )
                 params.append(p)
 
@@ -3014,6 +3018,47 @@ def _filter_commands(commands: list[CommandDef], pattern: str) -> list[CommandDe
 # ---------------------------------------------------------------------------
 
 
+def _serialize_openapi_path_param(value, param: ParamDef) -> str:
+    """Serialize flat path values, encoding data before adding style delimiters."""
+    value = coerce_value(value, param.schema)
+    style = param.style or "simple"
+
+    def encode(atom):
+        text = str(atom).lower() if isinstance(atom, bool) else str(atom)
+        # HTTP clients normalize literal dot segments before sending a request.
+        if text in (".", ".."):
+            return text.replace(".", "%2E")
+        return quote(text, safe="")
+
+    name = encode(param.original_name)
+    if isinstance(value, dict):
+        pairs = [(encode(k), encode(v)) for k, v in value.items() if v is not None]
+        if not pairs:
+            return ""
+        if param.explode:
+            parts = [f"{k}={v}" for k, v in pairs]
+            if style == "matrix":
+                return ";" + ";".join(parts)
+        else:
+            parts = [atom for pair in pairs for atom in pair]
+    elif isinstance(value, list):
+        parts = [encode(v) for v in value if v is not None]
+        if not parts:
+            return ""
+        if style == "matrix" and param.explode:
+            return "".join(f";{name}={part}" for part in parts)
+    else:
+        parts = [encode(value)]
+
+    separator = "." if style == "label" and param.explode else ","
+    serialized = separator.join(parts)
+    if style == "label":
+        return "." + serialized
+    if style == "matrix":
+        return f";{name}={serialized}" if serialized else f";{name}"
+    return serialized
+
+
 def _collect_openapi_params(
     cmd: CommandDef,
     args: argparse.Namespace,
@@ -3033,7 +3078,9 @@ def _collect_openapi_params(
         if p.location == "path":
             val = getattr(args, _param_dest(p), None)
             if val is not None:
-                path = path.replace(f"{{{p.original_name}}}", str(val))
+                path = path.replace(
+                    f"{{{p.original_name}}}", _serialize_openapi_path_param(val, p)
+                )
 
     # Query and header values are transport metadata on every verb, so gather
     # them once here -- including when --stdin supplies the body, which used to
