@@ -72,6 +72,19 @@ class TestMCPStdio:
         assert r.returncode == 0
         assert "10" in r.stdout
 
+    def test_optional_params_keep_their_type(self):
+        """Optional[list/int/bool] arrive as anyOf [T, null] from pydantic."""
+        r = self._run(
+            "--refresh", "echo-optional", "--tags", "a,b", "--count", "3", "--verbose"
+        )
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == {"count": 3, "tags": ["a", "b"], "verbose": True}
+
+    def test_optional_array_help_hint(self):
+        r = self._run("--refresh", "echo-optional", "--help")
+        assert r.returncode == 0
+        assert "(JSON array)" in r.stdout
+
     def test_list_items(self):
         r = self._run("list-items", "--path", "/tmp")
         assert r.returncode == 0
