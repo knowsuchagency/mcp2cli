@@ -95,6 +95,34 @@ TOOLS = [
         },
     },
     {
+        # Optional[...] params as pydantic (FastMCP, MCPServer) emits them.
+        "name": "echo_optional",
+        "description": "Echo back optional arguments",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "anyOf": [
+                        {"type": "array", "items": {"type": "string"}},
+                        {"type": "null"},
+                    ],
+                    "default": None,
+                    "title": "Tags",
+                },
+                "count": {
+                    "anyOf": [{"type": "integer"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Count",
+                },
+                "verbose": {
+                    "anyOf": [{"type": "boolean"}, {"type": "null"}],
+                    "default": None,
+                    "title": "Verbose",
+                },
+            },
+        },
+    },
+    {
         "name": "client_roots",
         "description": "Return roots exposed by the connected client",
         "inputSchema": {"type": "object", "properties": {}},
@@ -184,6 +212,11 @@ def _call_tool(name: str, arguments: dict) -> dict:
         return {
             "content": [],
             "structuredContent": {"answer": 42},
+            "isError": False,
+        }
+    if name == "echo_optional":
+        return {
+            "content": [_text(json.dumps(arguments, sort_keys=True))],
             "isError": False,
         }
     if name == "reserved_args":

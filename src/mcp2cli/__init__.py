@@ -191,6 +191,24 @@ def _normalize_schema_type(t):
     return t
 
 
+def _collapse_nullable(schema: dict) -> dict:
+    """Pydantic (FastMCP, FastAPI) writes Optional[T] as
+    {"anyOf": [{T}, {"type": "null"}]} with no top-level "type". Reduce that
+    to {T}, keeping outer keys such as description; anything else passes
+    through."""
+    if not isinstance(schema, dict) or "type" in schema:
+        return schema
+    unions = [k for k in ("anyOf", "oneOf") if k in schema]
+    if len(unions) != 1 or not isinstance(schema[unions[0]], list):
+        return schema
+    branches = schema[unions[0]]
+    concrete = [b for b in branches if not (isinstance(b, dict) and b.get("type") == "null")]
+    if len(branches) != 2 or len(concrete) != 1 or not isinstance(concrete[0], dict):
+        return schema
+    outer = {k: v for k, v in schema.items() if k != unions[0]}
+    return {**concrete[0], **outer}
+
+
 def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
     t = _normalize_schema_type(schema.get("type"))
     if t == "integer":
@@ -1668,7 +1686,7 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
             for param in _merge_openapi_parameters(
                 shared_params, details.get("parameters")
             ):
-                schema = param.get("schema", {})
+                schema = _collapse_nullable(param.get("schema", {}))
                 py_type, suffix = schema_type_to_python(schema)
                 p = ParamDef(
                     name=to_kebab(param["name"]),
@@ -1710,6 +1728,7 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
             has_body = bool(properties)
 
             for prop_name, prop_schema in properties.items():
+                prop_schema = _collapse_nullable(prop_schema)
                 is_binary = (
                     cmd_content_type == "multipart/form-data"
                     and prop_schema.get("format") == "binary"
@@ -1787,6 +1806,7 @@ def extract_mcp_commands(tools: list[dict]) -> list[CommandDef]:
         params: list[ParamDef] = []
 
         for prop_name, prop_schema in schema.get("properties", {}).items():
+            prop_schema = _collapse_nullable(prop_schema)
             py_type, suffix = schema_type_to_python(prop_schema)
             params.append(
                 ParamDef(

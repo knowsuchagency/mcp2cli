@@ -6,6 +6,8 @@ import json
 import shutil
 import sys
 
+import pytest
+
 from mcp2cli import (
     ParamDef,
     CommandDef,
@@ -432,6 +434,50 @@ class TestExtractOpenAPICommands:
         limit_param = next(p for p in list_pets.params if p.original_name == "limit")
         assert limit_param.schema.get("type") == "integer"
 
+    def test_nullable_anyof_params(self):
+        """FastAPI emits OpenAPI 3.1 Optional params as anyOf [T, null]."""
+        spec = {
+            "openapi": "3.1.0",
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "parameters": [
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "schema": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                            }
+                        ],
+                        "requestBody": {
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "tags": {
+                                                "anyOf": [
+                                                    {"type": "array", "items": {"type": "string"}},
+                                                    {"type": "null"},
+                                                ]
+                                            }
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+        }
+        cmd = extract_openapi_commands(spec)[0]
+        limit = next(p for p in cmd.params if p.original_name == "limit")
+        tags = next(p for p in cmd.params if p.original_name == "tags")
+        assert limit.python_type is int
+        assert coerce_value("5", limit.schema) == 5
+        assert tags.description.endswith("(JSON array)")
+        assert coerce_value("a,b", tags.schema) == ["a", "b"]
+
 
 class TestExtractMCPCommands:
     def test_basic(self):
@@ -493,6 +539,73 @@ class TestExtractMCPCommands:
         }
         assert first == reordered
         assert first["get_user_2"] == "get-user-2"
+
+    # Pydantic (FastMCP, the official SDK's MCPServer) writes Optional[T] as
+    # {"anyOf": [{T}, {"type": "null"}]} with no top-level "type".
+    @pytest.mark.parametrize(
+        "prop, raw, py_type, suffix, expected",
+        [
+            (
+                {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]},
+                "a,b", str, " (JSON array)", ["a", "b"],
+            ),
+            (
+                {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}]},
+                "1,2", str, " (JSON array)", [1, 2],
+            ),
+            ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, "3", int, "", 3),
+            ({"anyOf": [{"type": "number"}, {"type": "null"}]}, "2.5", float, "", 2.5),
+            ({"anyOf": [{"type": "null"}, {"type": "integer"}]}, "3", int, "", 3),
+            ({"oneOf": [{"type": "integer"}, {"type": "null"}]}, "3", int, "", 3),
+            (
+                {"anyOf": [{"type": "object"}, {"type": "null"}]},
+                '{"k": 1}', str, " (JSON object)", {"k": 1},
+            ),
+        ],
+        ids=["str-array", "int-array", "integer", "number", "null-first", "oneOf", "object"],
+    )
+    def test_nullable_anyof_keeps_type(self, prop, raw, py_type, suffix, expected):
+        prop = {**prop, "default": None, "title": "X"}
+        tools = [{"name": "t", "inputSchema": {"type": "object", "properties": {"x": prop}}}]
+        p = extract_mcp_commands(tools)[0].params[0]
+        assert p.python_type is py_type
+        assert p.description == "x" + suffix
+        assert coerce_value(raw, p.schema) == expected
+
+    def test_nullable_anyof_boolean_is_flag(self):
+        prop = {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": None}
+        tools = [{"name": "t", "inputSchema": {"type": "object", "properties": {"v": prop}}}]
+        p = extract_mcp_commands(tools)[0].params[0]
+        assert p.python_type is None  # store_true, like a plain boolean
+        assert coerce_value(True, p.schema) is True
+
+    def test_nullable_anyof_keeps_outer_description_and_enum(self):
+        prop = {
+            "anyOf": [{"type": "string", "enum": ["asc", "desc"]}, {"type": "null"}],
+            "description": "Sort order",
+            "default": None,
+        }
+        tools = [{"name": "t", "inputSchema": {"type": "object", "properties": {"o": prop}}}]
+        p = extract_mcp_commands(tools)[0].params[0]
+        assert p.description == "Sort order"
+        assert p.choices == ["asc", "desc"]
+
+    @pytest.mark.parametrize(
+        "prop",
+        [
+            # A real union: which branch applies is ambiguous, so leave it alone.
+            {"anyOf": [{"type": "integer"}, {"type": "string"}, {"type": "null"}]},
+            {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+            # A top-level "type" already wins.
+            {"type": "string", "anyOf": [{"format": "date"}, {"type": "null"}]},
+        ],
+        ids=["wide-union", "no-null", "top-level-type"],
+    )
+    def test_other_unions_unchanged(self, prop):
+        tools = [{"name": "t", "inputSchema": {"type": "object", "properties": {"x": prop}}}]
+        p = extract_mcp_commands(tools)[0].params[0]
+        assert p.schema == prop
+        assert p.python_type is str
 
 
 class TestBuildArgparseReservedFlags:
