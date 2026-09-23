@@ -178,6 +178,9 @@ mcp2cli --spec ./spec.json --auth-header "Authorization:Bearer tok_..." create-i
 # POST with JSON body from stdin
 echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --stdin
 
+# Flags given with --stdin are merged into the JSON (a conflicting value is an error)
+echo '{"name": "Fido"}' | mcp2cli --spec ./spec.json create-pet --tag dog --stdin
+
 # Local YAML spec
 mcp2cli --spec ./api.yaml --base-url http://localhost:8000 --list
 ```
