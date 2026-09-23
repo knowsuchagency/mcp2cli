@@ -181,6 +181,55 @@ def read_stdin_json(context: str):
         )
         sys.exit(1)
 
+_STDIN_MERGE_LOCATIONS = ("body", "tool_input", "graphql_arg")
+
+
+def _merge_stdin_flag_args(data, cmd, args, context: str):
+    """Merge explicitly passed parameter flags into the --stdin JSON object.
+
+    Without this, --stdin used the JSON verbatim and silently dropped every
+    parameter flag given alongside it. A flag that disagrees with the same key
+    in the JSON is an error rather than a silent override in either direction.
+    """
+    flags = {}
+    for p in cmd.params:
+        val = getattr(args, _param_dest(p), None)
+        if val is None:
+            continue
+        flag = f"--{p.cli_name or p.name}"
+        if p.location == "file":
+            print(f"Error: {flag} cannot be combined with --stdin.", file=sys.stderr)
+            sys.exit(1)
+        if p.location in _STDIN_MERGE_LOCATIONS:
+            flags[p.original_name] = (flag, coerce_value(val, p.schema))
+    if not flags:
+        return data
+    if not isinstance(data, dict):
+        names = ", ".join(flag for flag, _ in flags.values())
+        print(
+            f"Error: {names} can only be merged into a JSON object on --stdin "
+            f"for {context}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    merged = dict(data)
+    conflicts = []
+    for key, (flag, value) in flags.items():
+        if key in merged and merged[key] != value:
+            conflicts.append(
+                f"{flag} {json.dumps(value)} vs \"{key}\": {json.dumps(merged[key])}"
+            )
+        merged[key] = value
+    if conflicts:
+        print(
+            f"Error: flags conflict with the --stdin JSON for {context}: "
+            + "; ".join(conflicts)
+            + ". Pass each value in one place, or make them agree.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return merged
+
 
 def _normalize_schema_type(t):
     """JSON Schema allows "type": ["integer", "null"] (array form). Reduce it
@@ -2249,7 +2298,9 @@ def _build_graphql_document(
 
     # Build variables dict from args
     if getattr(args, "stdin", False) is True:
-        variables = read_stdin_json("GraphQL variables")
+        variables = _merge_stdin_flag_args(
+            read_stdin_json("GraphQL variables"), cmd, args, "GraphQL variables"
+        )
     else:
         variables = {}
         for p in cmd.params:
@@ -2880,7 +2931,8 @@ def build_argparse(
                 "--stdin",
                 action="store_true",
                 default=False,
-                help="Read JSON body/arguments from stdin",
+                help="Read JSON body/arguments from stdin; parameter flags "
+                "are merged in (a conflicting value is an error)",
             )
 
         for p in cmd.params:
@@ -3049,7 +3101,9 @@ def _collect_openapi_params(
 
     if cmd.method != "get":
         if getattr(args, "stdin", False) is True:
-            body = read_stdin_json("OpenAPI request body")
+            body = _merge_stdin_flag_args(
+                read_stdin_json("OpenAPI request body"), cmd, args, "OpenAPI request body"
+            )
         else:
             body = {}
             for p in cmd.params:
@@ -4408,7 +4462,9 @@ def handle_mcp(
     cmd: CommandDef = args._cmd
 
     if getattr(args, "stdin", False) is True:
-        arguments = read_stdin_json("MCP tool arguments")
+        arguments = _merge_stdin_flag_args(
+            read_stdin_json("MCP tool arguments"), cmd, args, "MCP tool arguments"
+        )
     else:
         arguments = {}
         for p in cmd.params:
@@ -5030,7 +5086,10 @@ def _handle_session_operations(
 
     cmd: CommandDef = args._cmd
     if getattr(args, "stdin", False) is True:
-        arguments = read_stdin_json(f"session {sess_name} tool arguments")
+        arguments = _merge_stdin_flag_args(
+            read_stdin_json(f"session {sess_name} tool arguments"),
+            cmd, args, f"session {sess_name} tool arguments",
+        )
     else:
         arguments = {}
         for p in cmd.params:

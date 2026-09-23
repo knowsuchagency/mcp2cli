@@ -194,6 +194,32 @@ class TestExecuteOpenAPI:
         data = json.loads(r.stdout)
         assert data["name"] == "Snowball"
 
+    def test_create_pet_stdin_merges_body_flags(self, petstore_server):
+        cmd = [
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--spec",
+            f"{petstore_server}/openapi.json",
+            "--base-url",
+            f"{petstore_server}/api/v1",
+            "create-pet",
+            "--tag",
+            "rabbit",
+            "--stdin",
+        ]
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            input='{"name": "Snowball"}',
+            timeout=15,
+        )
+        assert r.returncode == 0, r.stderr
+        data = json.loads(r.stdout)
+        assert data["name"] == "Snowball"
+        assert data["tag"] == "rabbit"
+
     def test_create_pet_stdin_invalid_json(self, petstore_server):
         cmd = [
             sys.executable,

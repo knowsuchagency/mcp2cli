@@ -384,6 +384,16 @@ class TestGraphQLIntegration:
         data = json.loads(r.stdout)
         assert data["name"] == "StdinUser"
 
+    def test_stdin_merges_flags_into_variables(self, graphql_server):
+        r = _run(
+            ["--graphql", graphql_server, "create-user", "--email", "flag@example.com", "--stdin"],
+            input_data=json.dumps({"name": "StdinUser"}),
+        )
+        assert r.returncode == 0, r.stderr
+        data = json.loads(r.stdout)
+        assert data["name"] == "StdinUser"
+        assert data["email"] == "flag@example.com"
+
     def test_list_arg_comma_delimited(self, graphql_server):
         r = _run(["--graphql", graphql_server, "users-by-ids", "--ids", "1,2"])
         assert r.returncode == 0

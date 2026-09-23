@@ -122,6 +122,32 @@ class TestMCPStdio:
         assert r.returncode != 0
         assert "invalid JSON" in r.stderr
 
+    def test_stdin_merges_parameter_flags(self):
+        r = self._run("add-numbers", "--a", "3", "--stdin", stdin_data='{"b": 7}')
+        assert r.returncode == 0, r.stderr
+        assert "10" in r.stdout
+
+    def test_stdin_accepts_flag_matching_json(self):
+        r = self._run(
+            "add-numbers", "--a", "3", "--stdin", stdin_data='{"a": 3, "b": 7}'
+        )
+        assert r.returncode == 0, r.stderr
+        assert "10" in r.stdout
+
+    def test_stdin_rejects_flag_conflicting_with_json(self):
+        r = self._run(
+            "echo", "--message", "flag", "--stdin", stdin_data='{"message": "json"}'
+        )
+        assert r.returncode != 0
+        assert "--message" in r.stderr
+        assert "conflict" in r.stderr
+        assert r.stdout == ""
+
+    def test_stdin_flags_need_a_json_object(self):
+        r = self._run("echo", "--message", "flag", "--stdin", stdin_data="[1]")
+        assert r.returncode != 0
+        assert "JSON object" in r.stderr
+
     def test_no_subcommand_shows_tools(self):
         r = self._run()
         assert r.returncode == 0
