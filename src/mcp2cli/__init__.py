@@ -182,6 +182,23 @@ def read_stdin_json(context: str):
         sys.exit(1)
 
 
+def split_shell_command(command: str) -> list[str]:
+    """Split a shell-style command string into an argv list.
+
+    ``shlex.split`` defaults to POSIX rules, which treat backslash as an escape
+    and therefore mangle native Windows paths (``D:\\tools\\python.exe`` becomes
+    ``D:toolspython.exe``).  On Windows keep the backslashes and strip any
+    surrounding quotes instead.
+    """
+    if os.name == "nt":
+        parts = shlex.split(command, posix=False)
+        return [
+            p[1:-1] if len(p) >= 2 and p[0] == p[-1] and p[0] in "\"'" else p
+            for p in parts
+        ]
+    return shlex.split(command)
+
+
 def _normalize_schema_type(t):
     """JSON Schema allows "type": ["integer", "null"] (array form). Reduce it
     to the single concrete type, dropping "null"; anything else passes through."""
@@ -189,6 +206,33 @@ def _normalize_schema_type(t):
         concrete = [x for x in t if x != "null"]
         return concrete[0] if len(concrete) == 1 else None
     return t
+
+
+def _union_prefer_numeric(schema: dict) -> type | None:
+    """Pick a numeric python type from an anyOf/oneOf union, if any branch is
+    integer/number.  Returns None when no numeric branch exists, so callers fall
+    back to default logic.
+
+    This covers the common MCP pattern
+    ``anyOf: [{type: string, const: ""}, {type: integer, minimum: 1}]`` where the
+    empty-string branch means "omitted" yet any real CLI value is a number.
+    integer wins over float so ``--precision 6`` round-trips as int 6.
+    """
+    alternatives = schema.get("anyOf") or schema.get("oneOf") or []
+    if not isinstance(alternatives, list):
+        return None
+    preferred: type | None = None
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            continue
+        t = alt.get("type")
+        if t == "integer":
+            preferred = int
+        elif t == "number" and preferred != int:
+            preferred = float
+        if preferred is None and (alt.get("anyOf") or alt.get("oneOf")):
+            preferred = _union_prefer_numeric(alt)
+    return preferred
 
 
 def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
@@ -213,6 +257,13 @@ def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
                 return int, ""
             if all(isinstance(v, (int, float)) for v in enum):
                 return float, ""
+    # union branches: prefer a numeric branch over the string default (see
+    # _union_prefer_numeric).  Applied even when a top-level "string" is also
+    # present, since an anyOf with a numeric member means values are numbers.
+    if schema.get("anyOf") is not None or schema.get("oneOf") is not None:
+        union_type = _union_prefer_numeric(schema)
+        if union_type is not None:
+            return union_type, ""
     return str, ""
 
 
@@ -3432,7 +3483,7 @@ def run_mcp_stdio(
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
 
-        parts = shlex.split(command_str)
+        parts = split_shell_command(command_str)
         env = {**os.environ, **env_vars}
         params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
 
@@ -4152,7 +4203,7 @@ def _run_session_daemon(config_json: str):
         if is_stdio:
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            parts = shlex.split(source)
+            parts = split_shell_command(source)
             env = {**os.environ, **env_vars}
             params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
             async with stdio_client(params) as (read, write):
@@ -4455,7 +4506,7 @@ def _fetch_mcp_tools(
             from mcp import ClientSession
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
-            parts = shlex.split(source)
+            parts = split_shell_command(source)
             env = {**os.environ, **env_vars}
             params = StdioServerParameters(command=parts[0], args=parts[1:], env=env)
             async with stdio_client(params) as (read, write):
