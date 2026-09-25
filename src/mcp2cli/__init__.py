@@ -191,6 +191,33 @@ def _normalize_schema_type(t):
     return t
 
 
+def _union_prefer_numeric(schema: dict) -> type | None:
+    """Pick a numeric python type from an anyOf/oneOf union, if any branch is
+    integer/number.  Returns None when no numeric branch exists, so callers fall
+    back to default logic.
+
+    This covers the common MCP pattern
+    ``anyOf: [{type: string, const: ""}, {type: integer, minimum: 1}]`` where the
+    empty-string branch means "omitted" yet any real CLI value is a number.
+    integer wins over float so ``--precision 6`` round-trips as int 6.
+    """
+    alternatives = schema.get("anyOf") or schema.get("oneOf") or []
+    if not isinstance(alternatives, list):
+        return None
+    preferred: type | None = None
+    for alt in alternatives:
+        if not isinstance(alt, dict):
+            continue
+        t = alt.get("type")
+        if t == "integer":
+            preferred = int
+        elif t == "number" and preferred != int:
+            preferred = float
+        if preferred is None and (alt.get("anyOf") or alt.get("oneOf")):
+            preferred = _union_prefer_numeric(alt)
+    return preferred
+
+
 def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
     t = _normalize_schema_type(schema.get("type"))
     if t == "integer":
@@ -213,6 +240,13 @@ def schema_type_to_python(schema: dict) -> tuple[type | None, str]:
                 return int, ""
             if all(isinstance(v, (int, float)) for v in enum):
                 return float, ""
+    # union branches: prefer a numeric branch over the string default (see
+    # _union_prefer_numeric).  Applied even when a top-level "string" is also
+    # present, since an anyOf with a numeric member means values are numbers.
+    if schema.get("anyOf") is not None or schema.get("oneOf") is not None:
+        union_type = _union_prefer_numeric(schema)
+        if union_type is not None:
+            return union_type, ""
     return str, ""
 
 
@@ -453,7 +487,6 @@ def _ensure_utf8_output() -> None:
                 reconfigure(errors="backslashreplace")
             except Exception:
                 pass
-
 
 
 def _apply_head(data, n: int):
@@ -991,8 +1024,6 @@ def _prompt_oauth_callback(attempts: int = 3) -> tuple[str, str, str | None]:
             if not remaining:
                 raise
             print(f"{exc} ({remaining} attempt(s) left)", file=sys.stderr)
-
-
 
 
 def _get_cached_redirect_uri(storage: "FileTokenStorage") -> str | None:
