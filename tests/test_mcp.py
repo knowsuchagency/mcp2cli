@@ -80,6 +80,18 @@ class TestMCPStdio:
         assert r.returncode == 0, r.stderr
         assert json.loads(r.stdout) == {"count": 3, "tags": ["a", "b"], "verbose": True}
 
+    def test_boolean_can_be_sent_as_false(self):
+        """`--no-<flag>` sends false; `--<flag>` still sends true; omitted sends nothing."""
+        r = self._run("--refresh", "echo-optional", "--no-verbose")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == {"verbose": False}
+        r = self._run("echo-optional", "--verbose")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == {"verbose": True}
+        r = self._run("echo-optional")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == {}
+
     def test_optional_array_help_hint(self):
         r = self._run("--refresh", "echo-optional", "--help")
         assert r.returncode == 0

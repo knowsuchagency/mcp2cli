@@ -727,6 +727,33 @@ class TestBuildArgparseReservedFlags:
         assert args.arg_help == "natural"
 
 
+class TestBuildArgparseBooleanFlags:
+    """A boolean parameter must be sendable as false as well as true."""
+
+    def _build(self, props):
+        from mcp2cli import build_argparse
+
+        tools = [{"name": "t", "inputSchema": {"type": "object", "properties": props}}]
+        pre = argparse.ArgumentParser(add_help=False)
+        return build_argparse(extract_mcp_commands(tools), pre)
+
+    def test_no_flag_sends_false(self):
+        parser = self._build({"recursive": {"type": "boolean", "default": True}})
+        assert parser.parse_args(["t", "--no-recursive"]).recursive is False
+        assert parser.parse_args(["t", "--recursive"]).recursive is True
+        assert parser.parse_args(["t"]).recursive is None
+
+    def test_existing_no_property_keeps_its_flag(self):
+        # A real `no-cache` property owns `--no-cache`; the `cache` boolean
+        # then stays a plain on-switch instead of failing the parser build.
+        parser = self._build(
+            {"cache": {"type": "boolean"}, "no-cache": {"type": "string"}}
+        )
+        args = parser.parse_args(["t", "--cache", "--no-cache", "x"])
+        assert args.cache is True
+        assert getattr(args, "no_cache") == "x"
+
+
 class TestSplitAtSubcommand:
     """Tests for _split_at_subcommand() — GH #15."""
 

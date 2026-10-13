@@ -825,6 +825,8 @@ _STRICT_SPEC = {
                     {"name": "tenantId", "in": "path", "required": True,
                      "schema": {"type": "string"}},
                     {"name": "region", "in": "query", "schema": {"type": "string"}},
+                    {"name": "archived", "in": "query",
+                     "schema": {"type": "boolean", "default": True}},
                     {"name": "X-Trace", "in": "header", "schema": {"type": "string"}},
                 ],
                 "requestBody": {"content": {"application/json": {"schema": {
@@ -936,3 +938,18 @@ class TestStrictBodySchemaOnTheWire:
         assert echo["query"] == {"region": "eu"}
         assert echo["body"] == {"name": "from-stdin"}
         assert echo["trace"] == "t-2"
+
+    def test_boolean_query_param_can_be_sent_as_false(self, strict_items_server):
+        base = ["create-item", "--tenant-id", "acme", "--name", "widget"]
+        sent = {}
+        for flag in ("--no-archived", "--archived"):
+            r = subprocess.run(
+                self._cmd(strict_items_server, *base, flag),
+                capture_output=True, text=True, timeout=15,
+            )
+            assert r.returncode == 0, r.stderr
+            sent[flag] = json.loads(r.stdout)["query"]
+        assert sent == {
+            "--no-archived": {"archived": "false"},
+            "--archived": {"archived": "true"},
+        }

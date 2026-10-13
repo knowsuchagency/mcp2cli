@@ -58,7 +58,7 @@ ARGPARSE_HELP_PERCENT_RE = re.compile(r"(?<!%)%(?![%\(])")
 class ParamDef:
     name: str  # kebab-case CLI flag
     original_name: str  # original name for API/tool call
-    python_type: type | None  # None means boolean (store_true)
+    python_type: type | None  # None means boolean (--flag / --no-flag)
     required: bool = False
     description: str = ""
     choices: list | None = None
@@ -2103,7 +2103,7 @@ def graphql_type_to_python(
         "ID": str,
         "Int": int,
         "Float": float,
-        "Boolean": None,  # store_true
+        "Boolean": None,  # boolean flag
     }
     py_type = scalar_map.get(type_name, str)
     return py_type, is_non_null, None
@@ -3043,13 +3043,18 @@ def build_argparse(
                 "are merged in (a conflicting value is an error)",
             )
 
+        cli_names = {p.cli_name or p.name for p in cmd.params}
         for p in cmd.params:
             flag = f"--{p.cli_name or p.name}"
             kwargs: dict = {}
             if p.python_type is not None:
                 kwargs["type"] = p.python_type
-            else:
+            elif f"no-{p.cli_name or p.name}" in cli_names:
+                # Another parameter already owns --no-<name>; keep the plain switch.
                 kwargs["action"] = "store_true"
+            else:
+                # --<name> sends true, --no-<name> sends false, omitted sends nothing.
+                kwargs["action"] = argparse.BooleanOptionalAction
             # Body/tool_input params are never argparse-required (--stdin bypasses them)
             if (
                 p.required
