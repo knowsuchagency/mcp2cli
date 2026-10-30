@@ -134,10 +134,36 @@ mcp2cli --mcp-stdio "npx @modelcontextprotocol/server-filesystem /tmp" --list
 mcp2cli --mcp-stdio "npx @modelcontextprotocol/server-filesystem /tmp" \
   read-file --path /tmp/hello.txt
 
+# Or hand the whole argument object over as JSON, no shell pipe needed
+mcp2cli --mcp-stdio "npx @modelcontextprotocol/server-filesystem /tmp" \
+  read-file --req-json '{"path": "/tmp/hello.txt"}'
+
 # Pass environment variables to the server process
 mcp2cli --mcp-stdio "node server.js" --env API_KEY=sk-... --env DEBUG=1 \
   search --query "test"
 ```
+
+### Raw tool definitions (`--schema`)
+
+`--list` shows a token-cheap, flattened view of each tool's parameters. When you
+need the exact wire contract — nested objects, `anyOf` branches, `default`,
+`outputSchema` — ask for the raw definition instead:
+
+```bash
+# Global form: wire name, or the kebab-case name shown by --list
+mcp2cli --mcp https://example.com/mcp --schema getUserProfile
+mcp2cli --mcp https://example.com/mcp --schema get-user-profile
+
+# After the tool name, including inside a session
+mcp2cli --mcp https://example.com/mcp get-user-profile --schema
+mcp2cli --session work get-user-profile --schema
+```
+
+The output is the server's own `tools/list` entry. Property names such as
+`fooBar` stay `fooBar`, and `inputSchema` / `outputSchema` / `annotations` keep
+their wire spelling — nothing is renamed or flattened.
+
+Only MCP sources support `--schema`; `--spec` and `--graphql` reject it.
 
 ### MCP roots and completion
 
@@ -163,6 +189,43 @@ mcp2cli --mcp https://example.com/mcp \
 Both options work when starting a persistent session; roots are retained by
 the session daemon and completion requests can be sent through `--session`.
 
+### Sessions — reuse one MCP connection
+
+A one-shot call pays for starting the server and running `initialize` every
+time. A named session keeps one daemon — and one MCP connection — alive and
+routes later calls to it.
+
+```bash
+# Start a daemon that owns the connection
+mcp2cli --session-start work --mcp-stdio "npx @modelcontextprotocol/server-filesystem ."
+
+# Call tools through it — no reconnect, no re-initialize
+mcp2cli --session work --list
+mcp2cli --session work read-file --path ./README.md
+
+# Inspect and stop
+mcp2cli --session-list
+mcp2cli --session-stop work
+```
+
+Sessions live under `~/.cache/mcp2cli/sessions` (override with
+`MCP2CLI_CACHE_DIR`). The daemon is detached from the shell that started it,
+so closing that terminal does not end the session.
+
+How a client reaches the daemon depends on the platform:
+
+| Platform | Transport | Notes |
+|---|---|---|
+| macOS, Linux | Unix domain socket (`<name>.sock`) | `sessions/` is `0700`, metadata `0600` |
+| Windows | Loopback TCP on `127.0.0.1` | Windows CPython has no `socket.AF_UNIX` |
+
+Every request carries a per-session token that the daemon generates on start,
+so another local process cannot drive your session by connecting to its port.
+`--session-stop` asks the daemon to exit over that same channel, which lets it
+close the MCP server cleanly and delete its own files. Set
+`MCP2CLI_SESSION_TRANSPORT=unix|tcp` to pin a transport instead of taking the
+platform default.
+
 ### OpenAPI mode
 
 ```bash
@@ -175,10 +238,13 @@ mcp2cli --spec ./openapi.json --base-url https://api.example.com list-pets --sta
 # With auth
 mcp2cli --spec ./spec.json --auth-header "Authorization:Bearer tok_..." create-item --name "Test"
 
-# POST with JSON body from stdin
+# POST with a JSON body given inline
+mcp2cli --spec ./spec.json create-pet --req-json '{"name": "Fido", "tag": "dog"}'
+
+# ...or piped to stdin
 echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --stdin
 
-# Flags given with --stdin are merged into the JSON (a conflicting value is an error)
+# Flags given with --req-json/--stdin are merged into the JSON (a conflicting value is an error)
 echo '{"name": "Fido"}' | mcp2cli --spec ./spec.json create-pet --tag dog --stdin
 
 # Local YAML spec
@@ -362,6 +428,8 @@ Options:
   --refresh               Bypass cache
   --list                  List available subcommands
   --search PATTERN        Search tools by name or description (implies --list)
+  --schema TOOL           Print one MCP tool's raw definition (inputSchema,
+                          outputSchema, annotations) with wire names preserved
   --sort MODE             Sort --list output: usage|recent|alpha|default
   --top N                 Show only the top N tools in --list output
   --compact               Space-separated tool names only, no descriptions

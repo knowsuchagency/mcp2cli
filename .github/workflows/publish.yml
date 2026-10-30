@@ -42,8 +42,38 @@ jobs:
 
       - run: .venv/bin/python -m pytest -q
 
+  # Path handling, process spawning and the session transport all branch on
+  # the platform, and the POSIX matrix never reaches those branches — the
+  # AF_UNIX-only session code shipped green for exactly that reason. One
+  # Windows job per supported SDK major is enough to catch a regression here;
+  # it does not need the full Python range.
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13"]
+        mcp: ["mcp<2", "mcp>=2,<3"]
+    name: windows (py${{ matrix.python }}, ${{ matrix.mcp }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - run: uv venv --python ${{ matrix.python }}
+
+      - run: uv pip install -e . --no-deps
+      - run: uv pip install "${{ matrix.mcp }}" httpx pyyaml pytest pytest-asyncio tiktoken
+
+      - name: Report resolved versions
+        run: .venv/Scripts/python.exe -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+
+      # The --toon tests shell out to a Node encoder and say nothing about the
+      # platform; skipping them keeps this job about Windows behaviour.
+      - run: .venv/Scripts/python.exe -m pytest -q -k "not toon"
+
   publish:
-    needs: test
+    needs: [test, windows]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:

@@ -25,27 +25,6 @@ import mcp2cli
 _PROC_FD = Path("/proc/self/fd")
 
 
-@pytest.fixture
-def session_home(tmp_path, monkeypatch):
-    """Point this process *and* the spawned daemon at a throwaway cache."""
-    cache = tmp_path / "session-cache"
-    sessions = cache / "sessions"
-    # The daemon is a fresh interpreter: only the environment reaches it.
-    monkeypatch.setenv("MCP2CLI_CACHE_DIR", str(cache))
-    monkeypatch.setattr(mcp2cli, "CACHE_DIR", cache)
-    monkeypatch.setattr(mcp2cli, "SESSIONS_DIR", sessions)
-    return sessions
-
-
-@pytest.fixture
-def started(session_home):
-    """Names to tear down; set up after `session_home`, so torn down first."""
-    names: list[str] = []
-    yield names
-    for name in names:
-        mcp2cli.session_stop(name)
-
-
 def _deny_dev_null(monkeypatch):
     """Refuse every /dev/null open, the way a hardened sandbox does."""
     real_open = os.open
@@ -84,7 +63,10 @@ def test_session_serves_calls_where_dev_null_is_denied(
 
     mcp2cli.session_start("sandboxed", mcp_test_server_cmd, True, [], {})
     assert "sandboxed" in capsys.readouterr().out
-    assert mcp2cli._session_sock_path("sandboxed").exists()
+    meta = mcp2cli._session_read_meta("sandboxed")
+    assert mcp2cli._session_endpoint(meta) is not None
+    if meta["endpoint"]["kind"] == "unix":
+        assert mcp2cli._session_sock_path("sandboxed").exists()
 
     names = [
         tool["name"] for tool in mcp2cli._session_request("sandboxed", "list_tools", {})
@@ -147,7 +129,11 @@ def test_session_bootstrap_keeps_configuration_out_of_process_arguments(
     def spawn(argv, **kwargs):
         spawned.extend(argv)
         assert kwargs["stdin"] == mcp2cli.subprocess.PIPE
-        mcp2cli._session_sock_path("private").touch()
+        # Readiness is the daemon publishing an endpoint, not a socket file.
+        mcp2cli._session_write_meta(
+            mcp2cli._session_meta_path("private"),
+            {"pid": 4242, "endpoint": {"kind": "unix", "path": "unused"}},
+        )
         return process
 
     monkeypatch.setattr(mcp2cli.subprocess, "Popen", spawn)

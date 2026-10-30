@@ -77,6 +77,8 @@ Options:
   --refresh               Bypass cache
   --list                  List available subcommands
   --search PATTERN        Search tools by name or description (implies --list)
+  --schema TOOL           Print one MCP tool's raw definition (inputSchema,
+                          outputSchema, annotations); wire names preserved
   --fields FIELDS         Override GraphQL selection set (e.g. "id name email")
   --pretty                Pretty-print JSON output
   --raw                   Print raw response body
@@ -183,11 +185,42 @@ mcp2cli --graphql https://api.example.com/graphql --search "user"
 
 `--search` implies `--list` — shows only matching tools.
 
-### POST with JSON body from stdin
+### Inspecting a tool's raw schema
+
+`--list --json` flattens each tool into CLI parameters and drops nested
+structure. To read the exact wire contract (nested objects, `anyOf`, `default`,
+`outputSchema`), print the raw definition:
 
 ```bash
+# Wire name, or the kebab-case name shown by --list
+mcp2cli --mcp https://mcp.example.com/sse --schema getUserProfile
+mcp2cli --mcp https://mcp.example.com/sse --schema get-user-profile
+
+# After the tool name, including through a session
+mcp2cli --mcp https://mcp.example.com/sse get-user-profile --schema
+mcp2cli --session work get-user-profile --schema
+```
+
+Output is the server's own `tools/list` entry — `inputSchema`, `outputSchema`,
+`annotations`, and property names such as `fooBar` are never renamed.
+
+### JSON request body (`--req-json` / `--stdin`)
+
+Pass the whole request as one JSON object. `--req-json` takes it inline, which
+avoids the shell pipeline (and the quoting pain on Windows); `--stdin` reads the
+same JSON from stdin. Flags given alongside are merged in, and a value that
+disagrees with the JSON is an error.
+
+```bash
+# Inline: OpenAPI body, MCP tool arguments, GraphQL variables
+mcp2cli --spec ./spec.json create-pet --req-json '{"name": "Fido", "tag": "dog"}'
+mcp2cli --mcp https://mcp.example.com/sse search --req-json '{"query": "test", "limit": 5}'
+
+# Piped stdin still works, and is what you want when a tool generated the JSON
 echo '{"name": "Fido", "tag": "dog"}' | mcp2cli --spec ./spec.json create-pet --stdin
 ```
+
+`--req-json` and `--stdin` are mutually exclusive.
 
 ### Multipart file uploads
 

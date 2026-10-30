@@ -347,7 +347,8 @@ class TestMCPStdio:
         assert r.returncode == 0
         roots = json.loads(r.stdout)
         assert {root["uri"] for root in roots} == {
-            "file:///tmp/workspace",
+            # A plain path becomes a platform-correct file:// URI.
+            Path("/tmp/workspace").expanduser().resolve().as_uri(),
             "file:///var/project",
         }
         assert {root["name"] for root in roots} == {"workspace", "project"}
@@ -588,7 +589,8 @@ class TestSessions:
             assert r.returncode == 0
             roots = json.loads(r.stdout)
             assert {root["uri"] for root in roots} == {
-                "file:///tmp/workspace",
+                # A plain path becomes a platform-correct file:// URI.
+                Path("/tmp/workspace").expanduser().resolve().as_uri(),
                 "file:///var/project",
             }
 
