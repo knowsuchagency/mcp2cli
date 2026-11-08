@@ -201,6 +201,9 @@ mcp2cli --mcp https://mcp.example.com/sse get-user-profile --schema
 mcp2cli --session work get-user-profile --schema
 ```
 
+A tool with its own `schema` parameter keeps `--schema` for that parameter; use
+the global `--schema TOOL` form for it.
+
 Output is the server's own `tools/list` entry — `inputSchema`, `outputSchema`,
 `annotations`, and property names such as `fooBar` are never renamed.
 

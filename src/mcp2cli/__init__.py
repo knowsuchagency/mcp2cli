@@ -1990,7 +1990,10 @@ def tool_definition(tool) -> dict:
     """
     if isinstance(tool, dict):
         return tool
-    return {k: v for k, v in _mcp_dump(tool).items() if v is not None}
+    # model_dump directly, not _mcp_dump: that renames ``_meta`` to ``meta``
+    # for mcp2cli's result envelope, and here the wire spelling is the point.
+    data = tool.model_dump(mode="json", by_alias=True)
+    return {k: v for k, v in data.items() if v is not None}
 
 
 def find_tool_definition(tools: list[dict], query: str) -> dict | None:
@@ -3137,10 +3140,12 @@ def build_argparse(
 ) -> argparse.ArgumentParser:
     """Build the subcommand parser.
 
-    *schema_flag* adds ``--schema`` to every MCP tool subcommand, so the raw
+    *schema_flag* adds ``--schema`` to MCP tool subcommands, so the raw
     definition can be requested after the tool name (``... read-file --schema``).
-    OpenAPI and GraphQL subcommands never expose it -- neither has a raw tool
-    definition to print.
+    A tool with its own ``schema`` parameter keeps ``--schema`` for that
+    parameter, as it always had; its definition is still one global
+    ``--schema TOOL`` away. OpenAPI and GraphQL subcommands never expose it --
+    neither has a raw tool definition to print.
     """
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -3155,7 +3160,12 @@ def build_argparse(
             help=escape_argparse_help(cmd.description),
             description=escape_argparse_help(cmd.description),
         )
-        _allocate_param_cli_names(cmd, reserved=("schema",) if schema_flag else ())
+        add_schema_flag = schema_flag and not any(
+            p.name == "schema" for p in cmd.params
+        )
+        _allocate_param_cli_names(
+            cmd, reserved=("schema",) if add_schema_flag else ()
+        )
         sub.set_defaults(_cmd=cmd)
 
         if cmd.has_body:
@@ -3176,9 +3186,10 @@ def build_argparse(
                 "is an error)",
             )
 
-        if schema_flag:
+        if add_schema_flag:
             sub.add_argument(
                 "--schema",
+                dest="_print_schema",
                 action="store_true",
                 default=False,
                 help="Print this tool's raw definition (inputSchema and, when "
@@ -4164,10 +4175,12 @@ def _session_read_meta(name: str) -> dict | None:
 def _session_write_meta(meta_path: Path, meta: dict):
     """Publish metadata atomically — the starter and clients poll this file."""
     tmp_path = meta_path.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(meta))
-    if not IS_WINDOWS:
-        with suppress(OSError):
-            os.chmod(tmp_path, 0o600)  # the file carries the session token
+    tmp_path.unlink(missing_ok=True)
+    # Created 0600 rather than chmod-ed after the write, so the session token
+    # is never readable by others, not even briefly. Windows ignores the mode.
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(meta))
     os.replace(tmp_path, meta_path)
 
 
@@ -4228,9 +4241,19 @@ def _session_connect(endpoint: dict, timeout: float = 5.0) -> socket.socket:
 
 
 def _session_send(
-    meta: dict, method: str, params: dict | None = None, timeout: float = 5.0
+    meta: dict,
+    method: str,
+    params: dict | None = None,
+    timeout: float = 5.0,
+    response_timeout: float | None = None,
 ) -> dict:
-    """Send one request to a session daemon and return the decoded response."""
+    """Send one request to a session daemon and return the decoded response.
+
+    *timeout* bounds the connect and the send. *response_timeout* bounds the
+    wait for the answer and defaults to none at all: a tool call takes as
+    long as the tool does, and cutting it off would fail a call that is still
+    running in the daemon.
+    """
     endpoint = _session_endpoint(meta)
     if endpoint is None:
         raise OSError("session has no endpoint")
@@ -4245,6 +4268,7 @@ def _session_send(
         conn.settimeout(timeout)
         conn.sendall(json.dumps(request).encode() + b"\n")
         conn.shutdown(socket.SHUT_WR)
+        conn.settimeout(response_timeout)
         data = b""
         while True:
             chunk = conn.recv(65536)
@@ -4265,7 +4289,7 @@ def _session_is_alive(meta: dict) -> bool:
     """
     if _session_endpoint(meta) is not None:
         try:
-            response = _session_send(meta, "ping", timeout=1.0)
+            response = _session_send(meta, "ping", timeout=1.0, response_timeout=1.0)
         except (OSError, json.JSONDecodeError):
             return False
         return (response.get("result") or {}).get("pong") is True
@@ -4312,7 +4336,7 @@ def session_stop(name: str):
         # is TerminateProcess and never reaches the daemon's handler.
         if _session_endpoint(meta) is not None:
             try:
-                _session_send(meta, "shutdown", timeout=5.0)
+                _session_send(meta, "shutdown", response_timeout=5.0)
             except (OSError, json.JSONDecodeError):
                 pass
         deadline = time.time() + 5
@@ -4645,11 +4669,8 @@ def _run_session_daemon(config_json: str):
                             break
                     return data
 
-                while not _shutdown:
-                    conn, _ = await anyio.to_thread.run_sync(_blocking_accept)
-                    if conn is None:
-                        break
-
+                async def _handle(conn):
+                    nonlocal _shutdown
                     try:
                         conn.settimeout(5)
                         raw = await anyio.to_thread.run_sync(
@@ -4657,7 +4678,7 @@ def _run_session_daemon(config_json: str):
                         )
                         line = raw.split(b"\n", 1)[0]
                         if not line:
-                            continue
+                            return
 
                         request = json.loads(line)
                         req_id = request.get("id", 0)
@@ -4692,16 +4713,26 @@ def _run_session_daemon(config_json: str):
                                     {"id": req_id, "error": str(e)}
                                 )
 
-                        def _send(c, data):
-                            c.sendall(data)
-
-                        await anyio.to_thread.run_sync(
-                            lambda: _send(conn, (response + "\n").encode())
-                        )
+                        # A tool call can outlast the 5s receive timeout.
+                        conn.settimeout(None)
+                        payload = (response + "\n").encode()
+                        await anyio.to_thread.run_sync(lambda: conn.sendall(payload))
                     except Exception:
                         pass
                     finally:
                         conn.close()
+
+                # Each connection is served in its own task, so a ping (and
+                # --session-stop) is answered while a long tool call is still
+                # running. Serving them one at a time made a busy daemon look
+                # dead, and a restart then orphaned it.
+                async with anyio.create_task_group() as tg:
+                    while not _shutdown:
+                        conn, _ = await anyio.to_thread.run_sync(_blocking_accept)
+                        if conn is None:
+                            break
+                        tg.start_soon(_handle, conn)
+                    tg.cancel_scope.cancel()
 
             finally:
                 server_sock.close()
@@ -4752,7 +4783,14 @@ def _session_request(name: str, method: str, params: dict | None = None) -> any:
     """Send a request to a session daemon and return the result."""
     meta = _session_read_meta(name)
     if _session_endpoint(meta) is None:
-        print(f"Error: session '{name}' not found", file=sys.stderr)
+        if meta is not None and _session_is_alive(meta):
+            print(
+                f"Error: session '{name}' was started by an older mcp2cli. "
+                f"Run --session-stop {name} and start it again.",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Error: session '{name}' not found", file=sys.stderr)
         sys.exit(1)
 
     try:
@@ -4975,7 +5013,7 @@ def handle_mcp(
 
     cmd: CommandDef = args._cmd
 
-    if getattr(args, "schema", False) is True:
+    if getattr(args, "_print_schema", False) is True:
         print_tool_schema(tools, cmd.tool_name or cmd.name, pretty=pretty)
         return
 
@@ -5613,7 +5651,7 @@ def _handle_session_operations(
         sys.exit(1)
 
     cmd: CommandDef = args._cmd
-    if getattr(args, "schema", False) is True:
+    if getattr(args, "_print_schema", False) is True:
         print_tool_schema(tools, cmd.tool_name or cmd.name, pretty=pre_args.pretty)
         return True
     arguments = resolve_json_input(

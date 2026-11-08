@@ -165,6 +165,9 @@ their wire spelling — nothing is renamed or flattened.
 
 Only MCP sources support `--schema`; `--spec` and `--graphql` reject it.
 
+A tool with its own `schema` parameter keeps `--schema` for that parameter, so
+use the global form (`--schema TOOL`) to see its definition.
+
 ### MCP roots and completion
 
 Expose one or more filesystem roots when a server scopes operations to a

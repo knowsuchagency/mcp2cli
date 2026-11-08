@@ -146,3 +146,45 @@ def test_request_reports_an_unknown_session(session_home, capsys):
 
     assert exc.value.code == 1
     assert "session 'missing' not found" in capsys.readouterr().err
+
+
+def test_long_call_outlasts_the_connect_timeout_and_daemon_stays_alive(
+    transport, session_home, started, mcp_test_server_cmd
+):
+    """A tool call can take longer than any client timeout, and the daemon
+    must keep answering pings while it runs: a busy daemon reported dead got
+    restarted over, which orphaned the original process."""
+    import threading
+
+    started.append("busy")
+    mcp2cli.session_start("busy", mcp_test_server_cmd, True, [], {})
+
+    result: dict = {}
+
+    def _call():
+        result["value"] = mcp2cli._session_request(
+            "busy",
+            "call_tool",
+            {"name": "slow_echo", "arguments": {"message": "late", "seconds": 6}},
+        )
+
+    worker = threading.Thread(target=_call)
+    worker.start()
+    try:
+        # Mid-call: the daemon is busy, not dead.
+        worker.join(timeout=1.5)
+        assert worker.is_alive()
+        assert [s["alive"] for s in mcp2cli.session_list()] == [True]
+    finally:
+        worker.join(timeout=30)
+
+    assert _text_content(result["value"]) == ["late"]
+
+
+def test_metadata_file_is_private(transport, session_home, started, mcp_test_server_cmd):
+    if mcp2cli.IS_WINDOWS:
+        pytest.skip("POSIX permissions")
+    started.append("private")
+    mcp2cli.session_start("private", mcp_test_server_cmd, True, [], {})
+    mode = mcp2cli._session_meta_path("private").stat().st_mode & 0o777
+    assert mode == 0o600
