@@ -4669,6 +4669,12 @@ def _run_session_daemon(config_json: str):
                             break
                     return data
 
+                # MCP calls still reach the server one at a time, in arrival
+                # order, as they always did: stateful servers (a browser, an
+                # open transaction) may not cope with overlapping calls. Only
+                # ping and shutdown skip this queue.
+                dispatch_lock = anyio.Lock()
+
                 async def _handle(conn):
                     nonlocal _shutdown
                     try:
@@ -4704,7 +4710,10 @@ def _run_session_daemon(config_json: str):
                             _shutdown = True
                         else:
                             try:
-                                resp_data = await _dispatch(session, method, params)
+                                async with dispatch_lock:
+                                    resp_data = await _dispatch(
+                                        session, method, params
+                                    )
                                 response = json.dumps(
                                     {"id": req_id, "result": resp_data}
                                 )
@@ -4725,7 +4734,8 @@ def _run_session_daemon(config_json: str):
                 # Each connection is served in its own task, so a ping (and
                 # --session-stop) is answered while a long tool call is still
                 # running. Serving them one at a time made a busy daemon look
-                # dead, and a restart then orphaned it.
+                # dead, and a restart then orphaned it. Stopping the session
+                # cancels a call that is still running.
                 async with anyio.create_task_group() as tg:
                     while not _shutdown:
                         conn, _ = await anyio.to_thread.run_sync(_blocking_accept)
