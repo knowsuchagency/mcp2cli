@@ -3585,6 +3585,36 @@ def _is_disconnect(exc: BaseException) -> bool:
     return isinstance(exc, MCPError) and exc.error.code == CONNECTION_CLOSED
 
 
+def _quiet_windows_resets(fn):
+    """Wrap an async entry point so Windows connection resets stay quiet.
+
+    On Windows the proactor loop reports a peer that resets a socket while the
+    transport closes (an HTTP server answering 401 and hanging up does this)
+    as "Exception in callback _call_connection_lost" with a full traceback,
+    after the real error was already handled. The reset is harmless, so it is
+    dropped; every other loop error still reaches the default handler.
+    """
+    if not IS_WINDOWS:
+        return fn
+
+    async def _run():
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+
+        def _handler(loop, context):
+            if isinstance(
+                context.get("exception"), (ConnectionResetError, ConnectionAbortedError)
+            ):
+                return
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_handler)
+        return await fn()
+
+    return _run
+
+
 def _run_mcp_clean(fn, source: str):
     """Run an MCP coroutine, reporting failures as one clean error line.
 
@@ -3593,7 +3623,7 @@ def _run_mcp_clean(fn, source: str):
     actual cause buried at the bottom. Set MCP2CLI_DEBUG=1 for the traceback.
     """
     try:
-        return anyio.run(fn)
+        return anyio.run(_quiet_windows_resets(fn))
     except SystemExit:
         raise
     except KeyboardInterrupt:  # pragma: no cover - interactive only
@@ -4786,7 +4816,7 @@ def _run_session_daemon(config_json: str):
                 except Exception:
                     await _via_sse()
 
-    anyio.run(_daemon)
+    anyio.run(_quiet_windows_resets(_daemon))
 
 
 def _session_request(name: str, method: str, params: dict | None = None) -> any:

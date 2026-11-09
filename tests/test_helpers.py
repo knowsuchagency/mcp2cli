@@ -1210,3 +1210,31 @@ class TestSplitShellCommand:
             "a b",
             "c d",
         ]
+
+
+def test_windows_connection_resets_do_not_reach_the_terminal(monkeypatch, caplog):
+    """The proactor loop's harmless reset callback must not print a traceback,
+    while any other loop error still does."""
+    import asyncio
+
+    import anyio
+
+    import mcp2cli
+
+    monkeypatch.setattr(mcp2cli, "IS_WINDOWS", True)
+
+    async def _work():
+        loop = asyncio.get_running_loop()
+        loop.call_exception_handler(
+            {"message": "reset", "exception": ConnectionResetError(10054, "reset")}
+        )
+        loop.call_exception_handler(
+            {"message": "other loop error", "exception": ValueError("real")}
+        )
+        return "ok"
+
+    # asyncio reports loop errors through the "asyncio" logger.
+    with caplog.at_level("ERROR", logger="asyncio"):
+        assert anyio.run(mcp2cli._quiet_windows_resets(_work)) == "ok"
+    assert "reset" not in [r.getMessage() for r in caplog.records]
+    assert "other loop error" in caplog.text
