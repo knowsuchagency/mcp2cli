@@ -1182,17 +1182,15 @@ class TestSplitShellCommand:
     """--mcp-stdio/--spec command strings: POSIX shlex rules eat Windows
     backslashes, so Windows splits without escapes (#122)."""
 
-    def _split_as(self, monkeypatch, os_name, command):
-        import os
-
-        from mcp2cli import split_shell_command
+    def _split_as(self, monkeypatch, is_windows, command):
+        import mcp2cli
 
         with monkeypatch.context() as m:
-            m.setattr(os, "name", os_name)
-            return split_shell_command(command)
+            m.setattr(mcp2cli, "IS_WINDOWS", is_windows)
+            return mcp2cli.split_shell_command(command)
 
     def test_windows_unquoted_path_keeps_backslashes(self, monkeypatch):
-        assert self._split_as(monkeypatch, "nt", r"C:\Python313\python.exe -m my_server") == [
+        assert self._split_as(monkeypatch, True, r"C:\Python313\python.exe -m my_server") == [
             r"C:\Python313\python.exe",
             "-m",
             "my_server",
@@ -1200,11 +1198,11 @@ class TestSplitShellCommand:
 
     def test_windows_quoted_path_and_args(self, monkeypatch):
         assert self._split_as(
-            monkeypatch, "nt", r'"C:\Program Files\Py\python.exe" -c "print(1)"'
+            monkeypatch, True, r'"C:\Program Files\Py\python.exe" -c "print(1)"'
         ) == [r"C:\Program Files\Py\python.exe", "-c", "print(1)"]
 
     def test_posix_rules_unchanged(self, monkeypatch):
-        assert self._split_as(monkeypatch, "posix", r'python -m foo --x "a b" c\ d') == [
+        assert self._split_as(monkeypatch, False, r'python -m foo --x "a b" c\ d') == [
             "python",
             "-m",
             "foo",
@@ -1212,3 +1210,31 @@ class TestSplitShellCommand:
             "a b",
             "c d",
         ]
+
+
+def test_windows_connection_resets_do_not_reach_the_terminal(monkeypatch, caplog):
+    """The proactor loop's harmless reset callback must not print a traceback,
+    while any other loop error still does."""
+    import asyncio
+
+    import anyio
+
+    import mcp2cli
+
+    monkeypatch.setattr(mcp2cli, "IS_WINDOWS", True)
+
+    async def _work():
+        loop = asyncio.get_running_loop()
+        loop.call_exception_handler(
+            {"message": "reset", "exception": ConnectionResetError(10054, "reset")}
+        )
+        loop.call_exception_handler(
+            {"message": "other loop error", "exception": ValueError("real")}
+        )
+        return "ok"
+
+    # asyncio reports loop errors through the "asyncio" logger.
+    with caplog.at_level("ERROR", logger="asyncio"):
+        assert anyio.run(mcp2cli._quiet_windows_resets(_work)) == "ok"
+    assert "reset" not in [r.getMessage() for r in caplog.records]
+    assert "other loop error" in caplog.text

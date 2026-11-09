@@ -345,6 +345,33 @@ def _clean_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp2cli, "CACHE_DIR", tmp_path / "cache")
 
 
+@pytest.fixture
+def session_home(tmp_path, monkeypatch):
+    """Point this process *and* spawned session daemons at a throwaway cache.
+
+    The daemon is a fresh interpreter, so only the environment reaches it.
+    """
+    import mcp2cli
+
+    cache = tmp_path / "session-cache"
+    sessions = cache / "sessions"
+    monkeypatch.setenv("MCP2CLI_CACHE_DIR", str(cache))
+    monkeypatch.setattr(mcp2cli, "CACHE_DIR", cache)
+    monkeypatch.setattr(mcp2cli, "SESSIONS_DIR", sessions)
+    return sessions
+
+
+@pytest.fixture
+def started(session_home):
+    """Names to tear down; set up after `session_home`, so torn down first."""
+    import mcp2cli
+
+    names: list[str] = []
+    yield names
+    for name in names:
+        mcp2cli.session_stop(name)
+
+
 # ---------------------------------------------------------------------------
 # Realistic MCP tool definitions — modeled after a real task management
 # server (Fulcrum, ~120 tools). These represent the JSON schemas that get

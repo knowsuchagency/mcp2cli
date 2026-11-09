@@ -137,6 +137,62 @@ class TestMCPStdio:
             "stdin": True,
         }
 
+    def test_schema_prints_the_raw_definition(self):
+        r = self._run("--schema", "describeTable")
+        assert r.returncode == 0, r.stderr
+        tool = json.loads(r.stdout)
+        assert tool["name"] == "describeTable"
+        assert "tableName" in tool["inputSchema"]["properties"]
+        assert tool["outputSchema"]["properties"] == {
+            "columnCount": {"type": "integer"}
+        }
+        # Wire spelling is the point of --schema: _meta stays _meta.
+        assert tool["_meta"] == {"vendor/tag": "x"}
+        assert "meta" not in tool
+
+    def test_schema_accepts_the_kebab_alias(self):
+        r = self._run("--schema", "describe-table")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["name"] == "describeTable"
+
+    def test_schema_after_the_tool_name(self):
+        r = self._run("echo", "--schema")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["name"] == "echo"
+
+    def test_schema_unknown_tool_fails(self):
+        r = self._run("--schema", "nope")
+        assert r.returncode == 1
+        assert "no tool named 'nope'" in r.stderr
+
+    def test_tool_parameter_named_schema_keeps_its_flag(self):
+        r = self._run("describe-table", "--schema", "public", "--table-name", "users")
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == {"schema": "public", "tableName": "users"}
+
+    def test_req_json_passes_arguments_inline(self):
+        r = self._run("echo", "--req-json", '{"message": "inline"}')
+        assert r.returncode == 0, r.stderr
+        assert "inline" in r.stdout
+
+    def test_req_json_merges_flags_and_names_itself_in_conflicts(self):
+        r = self._run("add-numbers", "--req-json", '{"a": 1}', "--b", "2")
+        assert r.returncode == 0, r.stderr
+        assert "3" in r.stdout
+        r = self._run("echo", "--req-json", '{"message": "x"}', "--message", "y")
+        assert r.returncode == 1
+        assert "--req-json JSON" in r.stderr
+
+    def test_req_json_and_stdin_are_exclusive(self):
+        r = self._run("echo", "--stdin", "--req-json", "{}", stdin_data="{}")
+        assert r.returncode != 0
+        assert "not allowed with" in r.stderr
+
+    def test_req_json_rejects_invalid_json(self):
+        r = self._run("echo", "--req-json", "{nope")
+        assert r.returncode == 1
+        assert "invalid JSON in --req-json" in r.stderr
+
     def test_echo_stdin(self):
         r = self._run("echo", "--stdin", stdin_data='{"message": "from stdin"}')
         assert r.returncode == 0
@@ -347,7 +403,8 @@ class TestMCPStdio:
         assert r.returncode == 0
         roots = json.loads(r.stdout)
         assert {root["uri"] for root in roots} == {
-            "file:///tmp/workspace",
+            # A plain path becomes a platform-correct file:// URI.
+            Path("/tmp/workspace").expanduser().resolve().as_uri(),
             "file:///var/project",
         }
         assert {root["name"] for root in roots} == {"workspace", "project"}
@@ -588,7 +645,8 @@ class TestSessions:
             assert r.returncode == 0
             roots = json.loads(r.stdout)
             assert {root["uri"] for root in roots} == {
-                "file:///tmp/workspace",
+                # A plain path becomes a platform-correct file:// URI.
+                Path("/tmp/workspace").expanduser().resolve().as_uri(),
                 "file:///var/project",
             }
 

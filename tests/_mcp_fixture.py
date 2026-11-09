@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 SERVER_NAME = "test-server"
 
@@ -127,6 +128,36 @@ TOOLS = [
         "description": "Return roots exposed by the connected client",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "slow_echo",
+        "description": "Echo a message after sleeping",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string"},
+                "seconds": {"type": "number"},
+            },
+        },
+    },
+    {
+        # A parameter literally named "schema" (common on database servers),
+        # plus a camelCase property and _meta, which --schema must keep as is.
+        "name": "describeTable",
+        "description": "Describe a table in a schema",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "schema": {"type": "string"},
+                "tableName": {"type": "string"},
+            },
+            "required": ["schema"],
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {"columnCount": {"type": "integer"}},
+        },
+        "_meta": {"vendor/tag": "x"},
+    },
 ]
 
 RESOURCES = [
@@ -222,6 +253,15 @@ def _call_tool(name: str, arguments: dict) -> dict:
     if name == "reserved_args":
         return {
             "content": [_text(json.dumps(arguments, sort_keys=True))],
+            "isError": False,
+        }
+    if name == "slow_echo":
+        time.sleep(float(arguments.get("seconds", 0)))
+        return {"content": [_text(arguments.get("message", ""))], "isError": False}
+    if name == "describeTable":
+        return {
+            "content": [_text(json.dumps(arguments, sort_keys=True))],
+            "structuredContent": {"columnCount": len(arguments)},
             "isError": False,
         }
     return {"content": [_text(f"Unknown tool: {name}")], "isError": True}
