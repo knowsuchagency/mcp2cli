@@ -1,8 +1,10 @@
 """Tests for OAuth support."""
 
+import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 
@@ -61,6 +63,91 @@ def _sdk_carries_iss():
 
 
 _SDK_CARRIES_ISS = _sdk_carries_iss()
+
+
+@contextlib.contextmanager
+def _listening_socket(host="127.0.0.1"):
+    """Hold a loopback port the way another process would; yield its number."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as s:
+        s.bind((host, 0))
+        s.listen()
+        yield s.getsockname()[1]
+
+
+def _port_bindable(host, port):
+    """Whether the next login's listener (SO_REUSEADDR, like HTTPServer) can bind."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            s.listen()
+        except OSError:
+            return False
+    return True
+
+
+def _ipv6_loopback_available():
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            s.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+def _seed_dcr_client(storage, redirect_uri, client_id="cached-dcr-id"):
+    """Persist a client.json as a prior Dynamic Client Registration would."""
+    import anyio
+    from mcp.shared.auth import OAuthClientInformationFull
+
+    async def _seed():
+        await storage.set_client_info(
+            OAuthClientInformationFull(client_id=client_id, redirect_uris=[redirect_uri])
+        )
+
+    anyio.run(_seed)
+
+
+def _run_browser_login(provider, query, monkeypatch):
+    """Run the default flow's redirect + callback handlers against a fake browser.
+
+    The fake browser GETs the provider's redirect_uri with ``query`` from a
+    thread, the way the real one lands on the callback after consent. It only
+    connects once ``webbrowser.open`` is called, so the request reaches a
+    listener only if ``redirect_handler`` bound it before opening the browser.
+    """
+    import threading
+    from urllib.request import urlopen
+
+    import anyio
+
+    redirect_uri = str(provider.context.client_metadata.redirect_uris[0])
+    browsers = []
+
+    def _browser(url):
+        thread = threading.Thread(
+            target=lambda: urlopen(f"{redirect_uri}?{query}", timeout=5).read(),
+            daemon=True,
+        )
+        thread.start()
+        browsers.append(thread)
+        return True
+
+    monkeypatch.setattr(mcp2cli.webbrowser, "open", _browser)
+
+    async def _login():
+        await provider.context.redirect_handler("https://auth.example.com/authorize")
+        return await provider.context.callback_handler()
+
+    try:
+        return anyio.run(_login)
+    finally:
+        for thread in browsers:
+            thread.join(timeout=5)
 
 
 class TestResolveSecret:
@@ -888,36 +975,12 @@ class TestCallbackHandler:
 class TestLocalListenerCallbackResult:
     """The default flow's callback_handler, driven by a real redirect request.
 
-    ``build_oauth_provider`` binds the loopback listener; the handler serves one
-    request and turns it into whatever the installed SDK expects. These tests
-    issue the redirect over HTTP the way a browser would, so the whole path --
-    handler, class state, result construction -- is exercised.
+    ``redirect_handler`` binds the loopback listener when the login starts; the
+    handler serves one request and turns it into whatever the installed SDK
+    expects. These tests issue the redirect over HTTP the way a browser would,
+    so the whole path -- lazy bind, handler, class state, result
+    construction -- is exercised.
     """
-
-    @staticmethod
-    def _drive(provider, query):
-        """GET ``query`` against the provider's listener; return its result."""
-        import threading
-        from urllib.parse import urlparse
-        from urllib.request import urlopen
-
-        import anyio
-
-        redirect_uri = str(provider.context.client_metadata.redirect_uris[0])
-        port = urlparse(redirect_uri).port
-        # The socket is already listening (HTTPServer binds in its
-        # constructor), so this request queues until handle_request accepts it.
-        redirect = threading.Thread(
-            target=lambda: urlopen(
-                f"http://127.0.0.1:{port}/callback?{query}", timeout=5
-            ).read(),
-            daemon=True,
-        )
-        redirect.start()
-        try:
-            return anyio.run(provider.context.callback_handler)
-        finally:
-            redirect.join(timeout=5)
 
     def test_redirect_with_iss_is_forwarded(self, tmp_path, monkeypatch):
         """RFC 9207: an issuer that reaches the listener must reach the SDK, or
@@ -925,9 +988,10 @@ class TestLocalListenerCallbackResult:
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
         provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
 
-        result = self._drive(
+        result = _run_browser_login(
             provider,
             "code=live-code&state=live-state&iss=https%3A%2F%2Fissuer.example.com",
+            monkeypatch,
         )
 
         assert _code_state(result) == ("live-code", "live-state")
@@ -940,7 +1004,7 @@ class TestLocalListenerCallbackResult:
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
         provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
 
-        result = self._drive(provider, "code=plain-code&state=plain-state")
+        result = _run_browser_login(provider, "code=plain-code&state=plain-state", monkeypatch)
 
         assert _code_state(result) == ("plain-code", "plain-state")
         if _SDK_CARRIES_ISS:
@@ -991,44 +1055,27 @@ class TestCachedRedirectUriReuse:
         redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
         assert redirect_uris[0] == f"http://127.0.0.1:{port}/callback"
 
-    def test_cached_redirect_uri_port_taken_falls_back(self, tmp_path, monkeypatch):
-        """When the cached port is occupied, clear client.json and pick a new port."""
-        import anyio
-        import socket
-        from mcp.shared.auth import OAuthClientInformationFull
+    def test_cached_redirect_uri_kept_when_port_busy_at_build(self, tmp_path, monkeypatch):
+        """A busy cached port at build time must not discard the registration.
 
+        Another mcp2cli run for the same server may be holding the port for
+        its own login. Wiping client.json here orphans tokens.json: with no
+        client_info the SDK cannot refresh, so the next expiry forces a full
+        DCR + browser login although the refresh token is still valid.
+        """
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
         storage = mcp2cli.FileTokenStorage("https://example.com/mcp")
 
-        # Use a port that we'll hold open
-        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        blocker.bind(("127.0.0.1", 0))
-        taken_port = blocker.getsockname()[1]
+        with _listening_socket() as taken_port:
+            cached_uri = f"http://127.0.0.1:{taken_port}/callback"
+            _seed_dcr_client(storage, cached_uri)
 
-        async def _seed():
-            await storage.set_client_info(
-                OAuthClientInformationFull(
-                    client_id="cached-dcr-id",
-                    redirect_uris=[f"http://127.0.0.1:{taken_port}/callback"],
-                )
-            )
+            provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
 
-        anyio.run(_seed)
-
-        # Build provider while port is still held
-        provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
         redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
-
-        # Should NOT be the taken port
-        assert redirect_uris[0] != f"http://127.0.0.1:{taken_port}/callback"
-        # Should still be a valid callback URI
-        assert redirect_uris[0].startswith("http://127.0.0.1:")
-        assert redirect_uris[0].endswith("/callback")
-
-        # client.json should have been cleared (stale)
-        assert not storage._client_path.exists()
-
-        blocker.close()
+        assert redirect_uris == [cached_uri]
+        assert storage._client_path.exists()
+        assert json.loads(storage._client_path.read_text())["client_id"] == "cached-dcr-id"
 
     def test_get_cached_redirect_uri_no_file(self, tmp_path, monkeypatch):
         """_get_cached_redirect_uri returns None when client.json absent."""
@@ -1059,21 +1106,6 @@ class TestCachedRedirectUriReuse:
         storage._client_path.write_text(json.dumps({"redirect_uris": []}))
         assert mcp2cli._get_cached_redirect_uri(storage) is None
 
-    def test_port_available_free_port(self):
-        """_port_available returns True for a free port."""
-        port = mcp2cli._find_free_port()
-        assert mcp2cli._port_available("127.0.0.1", port) is True
-
-    def test_port_available_taken_port(self):
-        """_port_available returns False for a taken port."""
-        import socket
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", 0))
-        taken_port = s.getsockname()[1]
-        assert mcp2cli._port_available("127.0.0.1", taken_port) is False
-        s.close()
-
     def test_explicit_redirect_uri_not_affected_by_cache(self, tmp_path, monkeypatch):
         """An explicit redirect_uri is not overridden by a cached client."""
         import anyio
@@ -1100,6 +1132,170 @@ class TestCachedRedirectUriReuse:
         redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
         assert "http://localhost:19890/callback" in redirect_uris
         assert "http://127.0.0.1:54321/callback" not in redirect_uris
+
+
+class TestLazyCallbackListener:
+    """The loopback listener is bound when a browser login starts, not before.
+
+    Every CLI invocation builds a provider, but most never log in (the token is
+    valid or refreshable). Binding at build time made parallel invocations for
+    the same server collide on the callback port: with a cached registration
+    the loser wiped client.json, orphaning tokens.json; with a fixed
+    --oauth-redirect-uri it died with "Address already in use".
+    """
+
+    URL = "https://example.com/mcp"
+
+    def test_build_binds_no_listener(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("building a provider must not bind a listener")
+
+        monkeypatch.setattr(mcp2cli, "HTTPServer", _explode)
+        mcp2cli.build_oauth_provider(self.URL)
+
+    def test_parallel_builds_with_explicit_redirect_uri(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        port = mcp2cli._find_free_port()
+        uri = f"http://127.0.0.1:{port}/callback"
+
+        first = mcp2cli.build_oauth_provider(self.URL, redirect_uri=uri)
+        second = mcp2cli.build_oauth_provider(self.URL, redirect_uri=uri)
+
+        assert first is not second
+        assert _port_bindable("127.0.0.1", port)
+
+    def test_parallel_builds_share_cached_registration(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        storage = mcp2cli.FileTokenStorage(self.URL)
+        port = mcp2cli._find_free_port()
+        cached_uri = f"http://127.0.0.1:{port}/callback"
+        _seed_dcr_client(storage, cached_uri)
+
+        providers = [mcp2cli.build_oauth_provider(self.URL) for _ in range(2)]
+
+        for provider in providers:
+            uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
+            assert uris == [cached_uri]
+        assert json.loads(storage._client_path.read_text())["client_id"] == "cached-dcr-id"
+
+    def test_login_serves_redirect_and_releases_port(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider(self.URL)
+        port = mcp2cli.urlparse(
+            str(provider.context.client_metadata.redirect_uris[0])
+        ).port
+
+        result = _run_browser_login(provider, "code=c1&state=s1", monkeypatch)
+
+        assert _code_state(result) == ("c1", "s1")
+        assert _port_bindable("127.0.0.1", port)
+
+    def test_each_login_binds_its_own_listener(self, tmp_path, monkeypatch):
+        """A provider that logs in twice (a 401 after the first login) rebinds."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider(self.URL)
+
+        first = _run_browser_login(provider, "code=c1&state=s1", monkeypatch)
+        second = _run_browser_login(provider, "code=c2&state=s2", monkeypatch)
+
+        assert _code_state(first) == ("c1", "s1")
+        assert _code_state(second) == ("c2", "s2")
+
+    @pytest.mark.skipif(not _ipv6_loopback_available(), reason="no IPv6 loopback")
+    def test_ipv6_redirect_uri_login(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        with _listening_socket("::1") as probe:
+            port = probe
+        provider = mcp2cli.build_oauth_provider(
+            self.URL, redirect_uri=f"http://[::1]:{port}/callback"
+        )
+
+        result = _run_browser_login(provider, "code=v6&state=s6", monkeypatch)
+
+        assert _code_state(result) == ("v6", "s6")
+
+    def test_callback_timeout_closes_listener(self, tmp_path, monkeypatch):
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        monkeypatch.setattr(mcp2cli.webbrowser, "open", lambda url: True)
+        port = mcp2cli._find_free_port()
+        provider = mcp2cli.build_oauth_provider(
+            self.URL, redirect_uri=f"http://127.0.0.1:{port}/callback"
+        )
+        anyio.run(provider.context.redirect_handler, "https://auth.example.com/a")
+
+        class _NeverSet:
+            def wait(self, timeout=None):
+                return False
+
+        monkeypatch.setattr(mcp2cli._CallbackHandler, "done", _NeverSet())
+        with pytest.raises(TimeoutError):
+            anyio.run(provider.context.callback_handler)
+        assert _port_bindable("127.0.0.1", port)
+
+    def test_busy_port_at_login_discards_cached_registration(self, tmp_path, monkeypatch):
+        """Issue #54 recovery, moved to the moment a listener is needed.
+
+        The registration is pinned to a port something else holds, so it is
+        dropped and the next run registers a fresh port. Tokens are kept.
+        """
+        import anyio
+        from mcp.shared.auth import OAuthToken
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        opened = []
+        monkeypatch.setattr(mcp2cli.webbrowser, "open", opened.append)
+        storage = mcp2cli.FileTokenStorage(self.URL)
+        anyio.run(
+            storage.set_tokens,
+            OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
+        )
+
+        with _listening_socket() as taken_port:
+            _seed_dcr_client(storage, f"http://127.0.0.1:{taken_port}/callback")
+            provider = mcp2cli.build_oauth_provider(self.URL)
+            with pytest.raises(
+                mcp2cli.OAuthCallbackPortInUseError, match=str(taken_port)
+            ):
+                anyio.run(provider.context.redirect_handler, "https://auth.example.com/a")
+
+            assert opened == [], "no browser for a login that cannot complete"
+            assert not storage._client_path.exists()
+            assert storage._tokens_path.exists()
+
+            fresh = mcp2cli.build_oauth_provider(self.URL)
+            fresh_uri = str(fresh.context.client_metadata.redirect_uris[0])
+            assert mcp2cli.urlparse(fresh_uri).port != taken_port
+
+    @pytest.mark.parametrize("client_id", [None, "fixed-client-id"])
+    def test_busy_port_at_login_keeps_client_for_explicit_redirect_uri(
+        self, tmp_path, monkeypatch, client_id
+    ):
+        """The caller fixed the port, so a new registration would hit the same
+        busy port: report it and keep the registration."""
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        monkeypatch.setattr(mcp2cli.webbrowser, "open", lambda url: True)
+        storage = mcp2cli.FileTokenStorage(self.URL)
+
+        with _listening_socket() as taken_port:
+            uri = f"http://127.0.0.1:{taken_port}/callback"
+            if client_id is None:
+                _seed_dcr_client(storage, uri)
+            provider = mcp2cli.build_oauth_provider(
+                self.URL, client_id=client_id, redirect_uri=uri
+            )
+            with pytest.raises(
+                mcp2cli.OAuthCallbackPortInUseError, match=str(taken_port)
+            ):
+                anyio.run(provider.context.redirect_handler, "https://auth.example.com/a")
+
+        expected = client_id or "cached-dcr-id"
+        assert json.loads(storage._client_path.read_text())["client_id"] == expected
 
 
 class TestParseOAuthCallbackInput:
@@ -1228,8 +1424,11 @@ class TestManualCallbackProvider:
         )
         assert isinstance(provider, OAuthClientProvider)
 
-    def test_default_flow_still_binds_a_server(self, tmp_path, monkeypatch):
+    def test_default_flow_binds_a_server_only_when_login_starts(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        monkeypatch.setattr(mcp2cli.webbrowser, "open", lambda url: True)
         original = mcp2cli.HTTPServer
         servers = []
 
@@ -1240,7 +1439,11 @@ class TestManualCallbackProvider:
 
         monkeypatch.setattr(mcp2cli, "HTTPServer", _spy)
         try:
-            mcp2cli.build_oauth_provider("https://example.com/mcp")
+            provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
+            assert servers == []
+            import anyio
+
+            anyio.run(provider.context.redirect_handler, "https://auth.example.com/a")
             assert len(servers) == 1
         finally:
             for server in servers:
@@ -1320,12 +1523,92 @@ class TestManualCallbackProvider:
         assert "--oauth-manual-callback" not in argv
 
 
+def _fake_authorization_server(token_forms):
+    """An httpx responder playing MCP server + authorization server (with DCR).
+
+    Every token-endpoint form is appended to ``token_forms``.
+    """
+    httpx = _sdk_httpx()
+
+    def respond(request):
+        path = request.url.path
+        if path == "/mcp" and "authorization" not in request.headers:
+            return httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://as.example.com/.well-known/oauth-protected-resource"'
+                },
+                request=request,
+            )
+        if path == "/.well-known/oauth-protected-resource":
+            payload = {
+                "resource": "https://as.example.com/mcp",
+                "authorization_servers": ["https://as.example.com"],
+            }
+        elif "oauth-authorization-server" in path or path.endswith(
+            "openid-configuration"
+        ):
+            payload = {
+                "issuer": "https://as.example.com",
+                "authorization_endpoint": "https://as.example.com/authorize",
+                "token_endpoint": "https://as.example.com/token",
+                "registration_endpoint": "https://as.example.com/register",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "code_challenge_methods_supported": ["S256"],
+            }
+        elif path == "/register":
+            body = json.loads(request.content)
+            return httpx.Response(
+                201,
+                json={
+                    "client_id": "dcr-client",
+                    "redirect_uris": body["redirect_uris"],
+                    "grant_types": body.get(
+                        "grant_types", ["authorization_code", "refresh_token"]
+                    ),
+                },
+                request=request,
+            )
+        elif path == "/token":
+            form = httpx.QueryParams(request.content.decode())
+            token_forms.append(form)
+            payload = {
+                "access_token": "TOKEN-OK",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            }
+        else:
+            payload = {"ok": True}
+        return httpx.Response(200, json=payload, request=request)
+
+    return respond
+
+
+def _drive_auth_flow(provider, respond):
+    """Run the provider's auth flow for one MCP request; return the final request."""
+    import anyio
+
+    httpx = _sdk_httpx()
+
+    async def drive():
+        request = httpx.Request("GET", "https://as.example.com/mcp")
+        flow = provider.async_auth_flow(request)
+        outbound = await flow.__anext__()
+        while True:
+            try:
+                outbound = await flow.asend(respond(outbound))
+            except StopAsyncIteration:
+                return outbound
+
+    return anyio.run(drive)
+
+
 class TestManualCallbackEndToEnd:
     """The pasted URL must actually complete the PKCE exchange (issue #71)."""
 
     def test_pasted_callback_completes_token_exchange(self, tmp_path, monkeypatch):
-        import anyio
-
         httpx = _sdk_httpx()
 
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
@@ -1351,73 +1634,54 @@ class TestManualCallbackEndToEnd:
         provider.context.redirect_handler = redirect_handler
 
         token_forms = []
-
-        def respond(request):
-            path = request.url.path
-            if path == "/mcp" and "authorization" not in request.headers:
-                return httpx.Response(
-                    401,
-                    headers={
-                        "WWW-Authenticate": "Bearer resource_metadata="
-                        '"https://as.example.com/.well-known/oauth-protected-resource"'
-                    },
-                    request=request,
-                )
-            if path == "/.well-known/oauth-protected-resource":
-                payload = {
-                    "resource": "https://as.example.com/mcp",
-                    "authorization_servers": ["https://as.example.com"],
-                }
-            elif "oauth-authorization-server" in path or path.endswith(
-                "openid-configuration"
-            ):
-                payload = {
-                    "issuer": "https://as.example.com",
-                    "authorization_endpoint": "https://as.example.com/authorize",
-                    "token_endpoint": "https://as.example.com/token",
-                    "registration_endpoint": "https://as.example.com/register",
-                    "response_types_supported": ["code"],
-                    "grant_types_supported": ["authorization_code", "refresh_token"],
-                    "code_challenge_methods_supported": ["S256"],
-                }
-            elif path == "/register":
-                body = json.loads(request.content)
-                return httpx.Response(
-                    201,
-                    json={
-                        "client_id": "dcr-client",
-                        "redirect_uris": body["redirect_uris"],
-                        "grant_types": body.get(
-                            "grant_types", ["authorization_code", "refresh_token"]
-                        ),
-                    },
-                    request=request,
-                )
-            elif path == "/token":
-                form = httpx.QueryParams(request.content.decode())
-                token_forms.append(form)
-                payload = {
-                    "access_token": "TOKEN-OK",
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                }
-            else:
-                payload = {"ok": True}
-            return httpx.Response(200, json=payload, request=request)
-
-        async def drive():
-            request = httpx.Request("GET", "https://as.example.com/mcp")
-            flow = provider.async_auth_flow(request)
-            outbound = await flow.__anext__()
-            while True:
-                try:
-                    outbound = await flow.asend(respond(outbound))
-                except StopAsyncIteration:
-                    return outbound
-
-        final = anyio.run(drive)
+        final = _drive_auth_flow(provider, _fake_authorization_server(token_forms))
 
         assert len(token_forms) == 1, "expected exactly one token exchange"
         assert token_forms[0].get("code") == "THE-CODE"
         assert token_forms[0].get("code_verifier"), "PKCE verifier must be sent"
         assert final.headers.get("authorization") == "Bearer TOKEN-OK"
+
+
+class TestBrowserCallbackEndToEnd:
+    """The default flow completes a real PKCE exchange with a lazily bound listener."""
+
+    def test_browser_redirect_completes_token_exchange(self, tmp_path, monkeypatch):
+        import threading
+        from urllib.request import urlopen
+
+        httpx = _sdk_httpx()
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = mcp2cli.build_oauth_provider("https://as.example.com/mcp")
+        redirect_uri = str(provider.context.client_metadata.redirect_uris[0])
+        port = mcp2cli.urlparse(redirect_uri).port
+        browsers = []
+
+        def _browser(url):
+            state = httpx.URL(url).params["state"]
+            thread = threading.Thread(
+                target=lambda: urlopen(
+                    f"{redirect_uri}?code=THE-CODE&state={state}", timeout=5
+                ).read(),
+                daemon=True,
+            )
+            thread.start()
+            browsers.append(thread)
+            return True
+
+        monkeypatch.setattr(mcp2cli.webbrowser, "open", _browser)
+        token_forms = []
+        try:
+            final = _drive_auth_flow(provider, _fake_authorization_server(token_forms))
+        finally:
+            for thread in browsers:
+                thread.join(timeout=5)
+
+        assert len(browsers) == 1
+        assert [form.get("code") for form in token_forms] == ["THE-CODE"]
+        assert final.headers.get("authorization") == "Bearer TOKEN-OK"
+        assert _port_bindable("127.0.0.1", port), "listener closed after the login"
+        storage = mcp2cli.FileTokenStorage("https://as.example.com/mcp")
+        assert json.loads(storage._client_path.read_text())["redirect_uris"] == [
+            redirect_uri
+        ]
