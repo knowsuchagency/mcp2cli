@@ -866,6 +866,15 @@ def load_cached(key: str, ttl: int) -> dict | None:
             return None
 
 
+class _ReplaceBlockedError(PermissionError):
+    """os.replace() onto ``filename`` was still refused after the retries.
+
+    On Windows this is a concurrent reader holding the file open. It is a
+    PermissionError, so callers that cannot afford to lose a write still
+    fail, while save_cache() can skip exactly this case and nothing else.
+    """
+
+
 def _write_private_file(path: Path, text: str) -> None:
     """Atomically replace ``path`` with ``text``, readable by the owner only.
 
@@ -885,7 +894,7 @@ def _write_private_file(path: Path, text: str) -> None:
     Windows refuses to replace a file that another process holds open for
     reading, so a concurrent reader turns the swap into PermissionError.
     Readers only hold the file for one read, so the swap is retried briefly
-    before the PermissionError propagates.
+    before _ReplaceBlockedError is raised.
 
     Any failure -- including Ctrl-C -- removes the temp file and leaves the
     file already on disk untouched.
@@ -902,9 +911,11 @@ def _write_private_file(path: Path, text: str) -> None:
             try:
                 os.replace(tmp, path)
                 return
-            except PermissionError:
+            except PermissionError as exc:
                 if attempt == 5:
-                    raise
+                    raise _ReplaceBlockedError(
+                        exc.errno, exc.strerror, str(path)
+                    ) from exc
                 time.sleep(0.01)
     except BaseException:
         try:
@@ -939,7 +950,7 @@ def save_cache(key: str, data: dict):
     # If a Windows reader keeps the entry locked past the retries, the
     # previous value is still valid, and the cache is an optimisation, not a
     # correctness requirement.
-    with suppress(PermissionError):
+    with suppress(_ReplaceBlockedError):
         _write_private_file(CACHE_DIR / f"{key}.json", payload)
 
 
