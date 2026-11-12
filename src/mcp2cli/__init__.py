@@ -3438,6 +3438,42 @@ def _collect_openapi_params(
     return path, query_params, extra_headers, body, files
 
 
+def _query_atom(value) -> str:
+    """Percent-encode one query value; nested JSON stays JSON, not a repr."""
+    if isinstance(value, bool):
+        text = str(value).lower()
+    elif isinstance(value, (dict, list)):
+        text = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    else:
+        text = str(value)
+    return quote(text, safe="")
+
+
+def _serialize_openapi_query_object(name: str, value: dict, param: ParamDef) -> str:
+    """Serialize an object query parameter per its OpenAPI style.
+
+    deepObject sends ``name[key]=value``; exploded form (the default for
+    query) sends each ``key=value`` as its own parameter; non-exploded form,
+    spaceDelimited and pipeDelimited send ``name=key,value,...`` joined by
+    their delimiter.
+    """
+    pairs = [(k, v) for k, v in value.items() if v is not None]
+    if not pairs:
+        return ""
+    style = param.style or "form"
+    encoded_name = quote(name, safe="")
+    if style == "deepObject":
+        return "&".join(
+            f"{encoded_name}[{quote(str(k), safe='')}]={_query_atom(v)}"
+            for k, v in pairs
+        )
+    if style == "form" and param.explode:
+        return "&".join(f"{quote(str(k), safe='')}={_query_atom(v)}" for k, v in pairs)
+    separator = {"spaceDelimited": "%20", "pipeDelimited": "%7C"}.get(style, ",")
+    atoms = [atom for k, v in pairs for atom in (quote(str(k), safe=""), _query_atom(v))]
+    return f"{encoded_name}={separator.join(atoms)}"
+
+
 def _serialize_openapi_query_params(cmd: CommandDef, query_params: dict) -> str:
     """Encode query array atoms before joining their OpenAPI delimiters."""
     parameters = {p.original_name: p for p in cmd.params if p.location == "query"}
@@ -3447,7 +3483,9 @@ def _serialize_openapi_query_params(cmd: CommandDef, query_params: dict) -> str:
         separator = {"form": ",", "spaceDelimited": "%20", "pipeDelimited": "%7C"}.get(
             param.style or "form"
         )
-        if isinstance(value, list) and not param.explode and separator is not None:
+        if isinstance(value, dict):
+            parts.append(_serialize_openapi_query_object(name, value, param))
+        elif isinstance(value, list) and not param.explode and separator is not None:
             if not value:
                 continue
             atoms = [

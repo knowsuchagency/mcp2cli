@@ -175,3 +175,80 @@ def test_query_params_extend_a_query_already_in_the_path(tmp_path, query_endpoin
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["raw_query"] == "kind=widget&tags=a,b"
+
+
+@pytest.mark.parametrize(
+    "serialization,value,raw_query",
+    [
+        (
+            {"style": "deepObject", "explode": True},
+            '{"status":"open","limit":5}',
+            "filter[status]=open&filter[limit]=5",
+        ),
+        (
+            {"style": "deepObject"},
+            '{"q":"a&b c","active":true,"skip":null}',
+            "filter[q]=a%26b%20c&filter[active]=true",
+        ),
+        ({}, '{"status":"open","limit":5}', "status=open&limit=5"),
+        (
+            {"style": "form", "explode": False},
+            '{"status":"open","limit":5}',
+            "filter=status,open,limit,5",
+        ),
+        (
+            {"style": "spaceDelimited", "explode": False},
+            '{"status":"open","limit":5}',
+            "filter=status%20open%20limit%205",
+        ),
+        (
+            {"style": "pipeDelimited", "explode": False},
+            '{"status":"open","limit":5}',
+            "filter=status%7Copen%7Climit%7C5",
+        ),
+        ({"style": "deepObject"}, "{}", ""),
+    ],
+)
+def test_query_object_wire_values(tmp_path, query_endpoint, serialization, value, raw_query):
+    spec = {
+        "openapi": "3.0.4",
+        "info": {"title": "Query objects", "version": "1"},
+        "servers": [{"url": query_endpoint}],
+        "paths": {
+            "/items": {
+                "get": {
+                    "operationId": "listItems",
+                    "parameters": [
+                        {
+                            "name": "filter",
+                            "in": "query",
+                            "schema": {"type": "object"},
+                            **serialization,
+                        }
+                    ],
+                    "responses": {"200": {"description": "Observed query parameters"}},
+                },
+            },
+        },
+    }
+    spec_path = tmp_path / "openapi.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mcp2cli",
+            "--spec",
+            str(spec_path),
+            "--json",
+            "list-items",
+            "--filter",
+            value,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["raw_query"] == raw_query
