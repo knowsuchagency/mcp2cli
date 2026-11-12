@@ -1853,6 +1853,38 @@ def _unique_openapi_name(
         suffix += 1
 
 
+def _flatten_all_of(schema):
+    """Merge an ``allOf`` composition into a single object schema.
+
+    ``allOf: [{$ref: Base}, {properties: ...}]`` is how generators spell
+    inheritance. ``$ref``s are already resolved by the time this runs, so the
+    branches' ``properties`` are combined and their ``required`` lists
+    unioned; the schema's own keys are applied last. Anything that is not an
+    ``allOf`` passes through unchanged.
+    """
+    if not isinstance(schema, dict) or not isinstance(schema.get("allOf"), list):
+        return schema
+    merged: dict = {}
+    properties: dict = {}
+    required: list = []
+    branches = [_flatten_all_of(b) for b in schema["allOf"] if isinstance(b, dict)]
+    own = {k: v for k, v in schema.items() if k != "allOf"}
+    for part in (*branches, own):
+        for key, value in part.items():
+            if key == "properties" and isinstance(value, dict):
+                properties.update(value)
+            elif key == "required" and isinstance(value, list):
+                required.extend(r for r in value if r not in required)
+            else:
+                merged[key] = value
+    if properties:
+        merged["properties"] = properties
+        merged.setdefault("type", "object")
+    if required:
+        merged["required"] = required
+    return merged
+
+
 def extract_openapi_commands(spec: dict) -> list[CommandDef]:
     commands: list[CommandDef] = []
     natural_names = _openapi_natural_names(spec)
@@ -1932,12 +1964,15 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                 rb_schema = {}
                 cmd_content_type = None
 
+            rb_schema = _flatten_all_of(rb_schema)
             required_fields = set(rb_schema.get("required", []))
             properties = rb_schema.get("properties", {})
-            has_body = bool(properties)
+            # Any declared body can be sent whole with --stdin/--req-json, even
+            # one (oneOf, a top-level array) that yields no per-field flags.
+            has_body = bool(properties) or bool(rb_schema)
 
             for prop_name, prop_schema in properties.items():
-                prop_schema = _collapse_nullable(prop_schema)
+                prop_schema = _collapse_nullable(_flatten_all_of(prop_schema))
                 is_binary = (
                     cmd_content_type == "multipart/form-data"
                     and prop_schema.get("format") == "binary"
