@@ -1159,20 +1159,35 @@ class OAuthCallbackPortInUseError(RuntimeError):
     """
 
 
-def _bind_callback_server(host: str, port: int) -> HTTPServer:
-    """Bind the loopback listener that receives one OAuth redirect.
+class _CallbackHTTPServer(HTTPServer):
+    """The loopback listener that receives one OAuth redirect.
 
-    Raises OSError when the port is taken. The socket is listening on return,
-    so a redirect that arrives before ``handle_request`` runs waits in the
-    backlog instead of being refused.
+    Binds on construction and raises OSError when the port is taken. The
+    socket is listening on return, so a redirect that arrives before
+    ``handle_request`` runs waits in the backlog instead of being refused.
     """
-    if host == "::1":
 
-        class _IPv6HTTPServer(HTTPServer):
-            address_family = socket.AF_INET6
+    # HTTPServer's SO_REUSEADDR means different things per platform, so
+    # server_bind picks the option itself.
+    allow_reuse_address = False
 
-        return _IPv6HTTPServer((host, port), _CallbackHandler)
-    return HTTPServer((host, port), _CallbackHandler)
+    def __init__(self, host: str, port: int) -> None:
+        self.address_family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+        super().__init__((host, port), _CallbackHandler)
+
+    def server_bind(self) -> None:
+        if IS_WINDOWS:
+            # Windows SO_REUSEADDR binds over a live listener: a busy port
+            # would go unnoticed and the redirect could reach the other one.
+            # SO_EXCLUSIVEADDRUSE fails the bind instead and keeps others off
+            # ours; Windows needs no SO_REUSEADDR to rebind over TIME_WAIT.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # POSIX SO_REUSEADDR still fails over a live listener, but lets the
+            # cached port be rebound while the last login's connection is in
+            # TIME_WAIT.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        super().server_bind()
 
 
 def _parse_oauth_callback_input(text: str) -> tuple[str, str, str | None]:
@@ -1588,7 +1603,7 @@ def build_oauth_provider(
         # callback port.  redirect_handler binds it before opening the browser
         # and hands it to callback_handler, which serves one redirect and
         # closes it.
-        server: HTTPServer | None = None
+        server: _CallbackHTTPServer | None = None
 
         async def redirect_handler(auth_url: str) -> None:
             nonlocal server
@@ -1598,7 +1613,7 @@ def build_oauth_provider(
             _CallbackHandler.error = None
             _CallbackHandler.done = threading.Event()
             try:
-                listener = _bind_callback_server(callback_host, port)
+                listener = _CallbackHTTPServer(callback_host, port)
             except OSError as exc:
                 if port_chosen_by_caller:
                     # Re-registering would land on the same fixed port, so

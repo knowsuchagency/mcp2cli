@@ -75,17 +75,42 @@ def _listening_socket(host="127.0.0.1"):
         yield s.getsockname()[1]
 
 
+@contextlib.contextmanager
+def _parallel_login_listener(host="127.0.0.1"):
+    """Hold a loopback port the way a parallel mcp2cli login would; yield its number.
+
+    Unlike a plain socket, this one binds with mcp2cli's own options, so on
+    Windows it is the case SO_REUSEADDR on both sides would silently share.
+    """
+    server = mcp2cli._CallbackHTTPServer(host, 0)
+    try:
+        yield server.server_address[1]
+    finally:
+        server.server_close()
+
+
 def _port_bindable(host, port):
-    """Whether the next login's listener (SO_REUSEADDR, like HTTPServer) can bind."""
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    with socket.socket(family, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind((host, port))
-            s.listen()
-        except OSError:
-            return False
+    """Whether the next login's listener can bind *port*.
+
+    Probed with that listener itself: a probe with other bind options answers
+    a different question (on Windows SO_REUSEADDR binds over a live listener;
+    on POSIX a bare bind fails while the last login's connection is in
+    TIME_WAIT).
+    """
+    try:
+        mcp2cli._CallbackHTTPServer(host, port).server_close()
+    except OSError:
+        return False
     return True
+
+
+# A busy callback port must be detected whoever holds it. The parallel login
+# matters on Windows: there SO_REUSEADDR on both sockets shares the port.
+_BUSY_PORT_OCCUPANTS = pytest.mark.parametrize(
+    "occupy",
+    [_listening_socket, _parallel_login_listener],
+    ids=["foreign-listener", "parallel-login"],
+)
 
 
 def _ipv6_loopback_available():
@@ -1152,7 +1177,7 @@ class TestLazyCallbackListener:
         def _explode(*args, **kwargs):
             raise AssertionError("building a provider must not bind a listener")
 
-        monkeypatch.setattr(mcp2cli, "HTTPServer", _explode)
+        monkeypatch.setattr(mcp2cli, "_CallbackHTTPServer", _explode)
         mcp2cli.build_oauth_provider(self.URL)
 
     def test_parallel_builds_with_explicit_redirect_uri(self, tmp_path, monkeypatch):
@@ -1236,7 +1261,10 @@ class TestLazyCallbackListener:
             anyio.run(provider.context.callback_handler)
         assert _port_bindable("127.0.0.1", port)
 
-    def test_busy_port_at_login_discards_cached_registration(self, tmp_path, monkeypatch):
+    @_BUSY_PORT_OCCUPANTS
+    def test_busy_port_at_login_discards_cached_registration(
+        self, tmp_path, monkeypatch, occupy
+    ):
         """Issue #54 recovery, moved to the moment a listener is needed.
 
         The registration is pinned to a port something else holds, so it is
@@ -1254,7 +1282,7 @@ class TestLazyCallbackListener:
             OAuthToken(access_token="a", token_type="Bearer", refresh_token="r"),
         )
 
-        with _listening_socket() as taken_port:
+        with occupy() as taken_port:
             _seed_dcr_client(storage, f"http://127.0.0.1:{taken_port}/callback")
             provider = mcp2cli.build_oauth_provider(self.URL)
             with pytest.raises(
@@ -1270,9 +1298,10 @@ class TestLazyCallbackListener:
             fresh_uri = str(fresh.context.client_metadata.redirect_uris[0])
             assert mcp2cli.urlparse(fresh_uri).port != taken_port
 
+    @_BUSY_PORT_OCCUPANTS
     @pytest.mark.parametrize("client_id", [None, "fixed-client-id"])
     def test_busy_port_at_login_keeps_client_for_explicit_redirect_uri(
-        self, tmp_path, monkeypatch, client_id
+        self, tmp_path, monkeypatch, client_id, occupy
     ):
         """The caller fixed the port, so a new registration would hit the same
         busy port: report it and keep the registration."""
@@ -1282,7 +1311,7 @@ class TestLazyCallbackListener:
         monkeypatch.setattr(mcp2cli.webbrowser, "open", lambda url: True)
         storage = mcp2cli.FileTokenStorage(self.URL)
 
-        with _listening_socket() as taken_port:
+        with occupy() as taken_port:
             uri = f"http://127.0.0.1:{taken_port}/callback"
             if client_id is None:
                 _seed_dcr_client(storage, uri)
@@ -1296,6 +1325,82 @@ class TestLazyCallbackListener:
 
         expected = client_id or "cached-dcr-id"
         assert json.loads(storage._client_path.read_text())["client_id"] == expected
+
+
+class TestCallbackServerBindOptions:
+    """The callback listener's bind options, checked for both platforms anywhere.
+
+    HTTPServer sets SO_REUSEADDR. On POSIX that only lets a port in TIME_WAIT
+    be rebound, which the cached callback port needs. On Windows it lets a
+    socket bind a port another one is listening on, so a busy port would go
+    unnoticed and the redirect could reach the other listener; there the port
+    must be held with SO_EXCLUSIVEADDRUSE instead. The real-socket tests above
+    only see the semantics of the platform they run on, so the selection is
+    pinned here against a socket stub.
+    """
+
+    class _SocketStub:
+        def __init__(self, family, kind):
+            self.family = family
+            self.options = {}
+            self.address = None
+
+        def setsockopt(self, level, option, value):
+            self.options[(level, option)] = value
+
+        def bind(self, address):
+            self.address = address
+
+        def getsockname(self):
+            return self.address
+
+        def listen(self, backlog):
+            pass
+
+        def close(self):
+            pass
+
+    @pytest.fixture
+    def bind(self, monkeypatch):
+        """Construct the listener on a stub socket; return the stub."""
+        monkeypatch.setattr(socket, "socket", self._SocketStub)
+
+        def _bind(host):
+            server = mcp2cli._CallbackHTTPServer(host, 5311)
+            server.server_close()
+            return server.socket
+
+        return _bind
+
+    @pytest.mark.parametrize(
+        ("host", "family"),
+        [("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)],
+        ids=["ipv4", "ipv6"],
+    )
+    def test_windows_holds_the_port_exclusively(self, bind, monkeypatch, host, family):
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", -5)
+        monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", exclusive, raising=False)
+        monkeypatch.setattr(mcp2cli, "IS_WINDOWS", True)
+
+        stub = bind(host)
+
+        assert stub.family == family
+        assert stub.address == (host, 5311)
+        assert stub.options == {(socket.SOL_SOCKET, exclusive): 1}
+
+    @pytest.mark.parametrize(
+        ("host", "family"),
+        [("127.0.0.1", socket.AF_INET), ("::1", socket.AF_INET6)],
+        ids=["ipv4", "ipv6"],
+    )
+    def test_posix_reuses_a_time_wait_port(self, bind, monkeypatch, host, family):
+        monkeypatch.setattr(mcp2cli, "IS_WINDOWS", False)
+
+        stub = bind(host)
+
+        assert stub.family == family
+        assert stub.address == (host, 5311)
+        assert stub.options == {(socket.SOL_SOCKET, socket.SO_REUSEADDR): 1}
 
 
 class TestParseOAuthCallbackInput:
@@ -1416,7 +1521,7 @@ class TestManualCallbackProvider:
         def _explode(*args, **kwargs):
             raise AssertionError("manual callback must not bind a local HTTP server")
 
-        monkeypatch.setattr(mcp2cli, "HTTPServer", _explode)
+        monkeypatch.setattr(mcp2cli, "_CallbackHTTPServer", _explode)
         from mcp.client.auth.oauth2 import OAuthClientProvider
 
         provider = mcp2cli.build_oauth_provider(
@@ -1429,15 +1534,15 @@ class TestManualCallbackProvider:
     ):
         monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
         monkeypatch.setattr(mcp2cli.webbrowser, "open", lambda url: True)
-        original = mcp2cli.HTTPServer
+        original = mcp2cli._CallbackHTTPServer
         servers = []
 
-        def _spy(addr, handler):
-            server = original(addr, handler)
+        def _spy(host, port):
+            server = original(host, port)
             servers.append(server)
             return server
 
-        monkeypatch.setattr(mcp2cli, "HTTPServer", _spy)
+        monkeypatch.setattr(mcp2cli, "_CallbackHTTPServer", _spy)
         try:
             provider = mcp2cli.build_oauth_provider("https://example.com/mcp")
             assert servers == []
