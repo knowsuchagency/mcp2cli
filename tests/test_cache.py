@@ -417,3 +417,39 @@ class TestCacheCorruptionResilience:
 
         assert m.load_cached("abc", 3600) == {"good": True}
         assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]
+
+    def test_unwritable_cache_dir_is_reported(self, monkeypatch, tmp_path):
+        """Only a locked entry is swallowed; a cache dir that refuses new
+        files is a real problem the user has to see."""
+        m = self._isolate(monkeypatch, tmp_path)
+
+        def denied(*_args, **_kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr(m.tempfile, "mkstemp", denied)
+        with pytest.raises(PermissionError):
+            m.save_cache("abc", {"hello": "world"})
+
+    def test_entry_locked_past_the_retries_is_skipped(
+        self, monkeypatch, tmp_path
+    ):
+        """A Windows reader holding the entry keeps the previous value."""
+        m = self._isolate(monkeypatch, tmp_path)
+        m.save_cache("abc", {"good": True})
+
+        def locked(*_args, **_kwargs):
+            raise PermissionError(13, "Access is denied")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(m.os, "replace", locked)
+            mp.setattr(m.time, "sleep", lambda _seconds: None)
+            m.save_cache("abc", {"replacement": True})
+            # Callers that must not lose a write (OAuth tokens) still get
+            # an error, and it is still a PermissionError.
+            with pytest.raises(m._ReplaceBlockedError) as excinfo:
+                m._write_private_file(tmp_path / "abc.json", "{}")
+
+        assert isinstance(excinfo.value, PermissionError)
+        assert excinfo.value.filename == str(tmp_path / "abc.json")
+        assert m.load_cached("abc", 3600) == {"good": True}
+        assert [q.name for q in tmp_path.iterdir()] == ["abc.json"]

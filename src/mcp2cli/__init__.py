@@ -866,48 +866,56 @@ def load_cached(key: str, ttl: int) -> dict | None:
             return None
 
 
-def save_cache(key: str, data: dict):
-    """Write a cache entry atomically.
+class _ReplaceBlockedError(PermissionError):
+    """os.replace() onto ``filename`` was still refused after the retries.
+
+    On Windows this is a concurrent reader holding the file open. It is a
+    PermissionError, so callers that cannot afford to lose a write still
+    fail, while save_cache() can skip exactly this case and nothing else.
+    """
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Atomically replace ``path`` with ``text``, readable by the owner only.
 
     A plain write_text() is not atomic: an interrupt, a full disk or two
-    concurrent mcp2cli runs can leave a half-written file behind, which is
-    how a cache entry becomes corrupt in the first place. Serialise first,
-    write to a freshly created private temp file in the same directory, then
-    os.replace() it into place -- readers only ever observe the old file or
-    the new one.
+    concurrent mcp2cli runs can leave a half-written file behind. Write to a
+    freshly created temp file in the same directory, then os.replace() it
+    into place -- readers only ever observe the old file or the new one.
 
     The temp file comes from tempfile.mkstemp(), so every writer gets storage
     of its own. A pid-derived name does not: two threads of one process share
     it, and each open() truncates whatever the other has written so far, so
     the file that gets replaced into place is a splice of both payloads.
+    mkstemp() also creates the file 0600 whatever the umask, so secrets
+    (OAuth tokens, client secrets, session tokens) are never readable by
+    other accounts, not even briefly. Windows ignores the mode.
+
+    Windows refuses to replace a file that another process holds open for
+    reading, so a concurrent reader turns the swap into PermissionError.
+    Readers only hold the file for one read, so the swap is retried briefly
+    before _ReplaceBlockedError is raised.
 
     Any failure -- including Ctrl-C -- removes the temp file and leaves the
-    entry already on disk untouched.
+    file already on disk untouched.
     """
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = CACHE_DIR / f"{key}.json"
-    payload = json.dumps(data)
     fd, tmp = tempfile.mkstemp(
-        dir=str(CACHE_DIR), prefix=f"{path.name}.", suffix=".tmp"
+        dir=str(path.parent), prefix=f"{path.name}.", suffix=".tmp"
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(payload)
+            fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        # Windows refuses to replace a file that another process holds open for
-        # reading, so a concurrent reader turns the swap into PermissionError.
-        # Readers only hold the file for one read, so retry briefly; if the
-        # entry stays locked the previous value is still valid, and the cache
-        # is an optimisation, not a correctness requirement.
         for attempt in range(6):
             try:
                 os.replace(tmp, path)
-                break
-            except PermissionError:
+                return
+            except PermissionError as exc:
                 if attempt == 5:
-                    os.unlink(tmp)
-                    return
+                    raise _ReplaceBlockedError(
+                        exc.errno, exc.strerror, str(path)
+                    ) from exc
                 time.sleep(0.01)
     except BaseException:
         try:
@@ -915,6 +923,35 @@ def save_cache(key: str, data: dict):
         except OSError:
             pass
         raise
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create ``path`` (with parents) and restrict it to the owner.
+
+    mkdir(mode=0o700) is masked by the umask and leaves an existing
+    directory alone, so the mode is set explicitly -- which also tightens a
+    directory an older version created world-readable. Windows has no POSIX
+    modes to set.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    if not IS_WINDOWS:
+        with suppress(OSError):
+            os.chmod(path, 0o700)
+
+
+def save_cache(key: str, data: dict):
+    """Write a cache entry atomically (see _write_private_file).
+
+    Serialisation happens first, so an unserialisable payload cannot destroy
+    the entry already on disk.
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(data)
+    # If a Windows reader keeps the entry locked past the retries, the
+    # previous value is still valid, and the cache is an optimisation, not a
+    # correctness requirement.
+    with suppress(_ReplaceBlockedError):
+        _write_private_file(CACHE_DIR / f"{key}.json", payload)
 
 
 # ---------------------------------------------------------------------------
@@ -1020,12 +1057,22 @@ class FileTokenStorage:
     access token has expired and trigger a refresh, rather than blindly
     re-sending the stale Bearer and falling through to a full re-auth that
     reuses a possibly-forgotten DCR client_id (issue #50).
+
+    Everything here is a credential -- refresh tokens may be offline tokens
+    with no expiry, and client.json may hold a client_secret -- so the
+    directories are 0700 and every file is written with _write_private_file.
     """
 
     def __init__(self, server_url: str):
         key = hashlib.sha256(server_url.encode()).hexdigest()[:16]
         self._dir = OAUTH_DIR / key
-        self._dir.mkdir(parents=True, exist_ok=True)
+        _make_private_dir(OAUTH_DIR)
+        _make_private_dir(self._dir)
+        if not IS_WINDOWS:
+            # Older versions wrote these files with the default umask (0644).
+            for path in self._dir.iterdir():
+                with suppress(OSError):
+                    os.chmod(path, 0o600)
         self._tokens_path = self._dir / "tokens.json"
         self._tokens_meta_path = self._dir / "tokens_meta.json"
         self._client_path = self._dir / "client.json"
@@ -1042,13 +1089,13 @@ class FileTokenStorage:
             return None
 
     async def set_tokens(self, tokens) -> None:
-        self._tokens_path.write_text(tokens.model_dump_json())
+        _write_private_file(self._tokens_path, tokens.model_dump_json())
         # Persist an absolute expiry timestamp so we can detect on a
         # later process start that the access token has expired.
         if tokens.expires_in is not None:
             try:
                 meta = {"expires_at": time.time() + float(tokens.expires_in)}
-                self._tokens_meta_path.write_text(json.dumps(meta))
+                _write_private_file(self._tokens_meta_path, json.dumps(meta))
             except Exception:
                 pass
         else:
@@ -1100,7 +1147,11 @@ class FileTokenStorage:
             return None
 
     async def set_client_info(self, client_info) -> None:
-        self._client_path.write_text(client_info.model_dump_json())
+        self.write_client_info(client_info)
+
+    def write_client_info(self, client_info) -> None:
+        """Persist client info synchronously (pre-seeding needs no event loop)."""
+        _write_private_file(self._client_path, client_info.model_dump_json())
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -1547,7 +1598,7 @@ def build_oauth_provider(
             response_types=["code"],
             scope=scope,
         )
-        storage._client_path.write_text(pre_client_info.model_dump_json())
+        storage.write_client_info(pre_client_info)
 
     if manual_callback:
         # Nothing on this host can receive the redirect (e.g. a VPS reached
@@ -4204,14 +4255,8 @@ def _session_read_meta(name: str) -> dict | None:
 
 def _session_write_meta(meta_path: Path, meta: dict):
     """Publish metadata atomically — the starter and clients poll this file."""
-    tmp_path = meta_path.with_suffix(".tmp")
-    tmp_path.unlink(missing_ok=True)
-    # Created 0600 rather than chmod-ed after the write, so the session token
-    # is never readable by others, not even briefly. Windows ignores the mode.
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(json.dumps(meta))
-    os.replace(tmp_path, meta_path)
+    # Owner-only: the metadata carries the session token.
+    _write_private_file(meta_path, json.dumps(meta))
 
 
 def _session_endpoint(meta: dict | None) -> dict | None:
@@ -4409,10 +4454,7 @@ def session_start(
     roots: list[str] | None = None,
 ):
     """Start a persistent session daemon."""
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    if not IS_WINDOWS:
-        with suppress(OSError):
-            os.chmod(SESSIONS_DIR, 0o700)  # it holds session tokens
+    _make_private_dir(SESSIONS_DIR)  # it holds session tokens
 
     # Check if already running
     meta_path = _session_meta_path(name)
