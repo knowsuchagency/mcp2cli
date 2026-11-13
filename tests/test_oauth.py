@@ -539,6 +539,133 @@ class TestRobustOAuthClientProvider:
 
         anyio.run(_drive)
 
+    _SPLIT_SERVER_URL = "https://gateway.example.com/netbox/mcp"
+    _SPLIT_ISSUER = "https://sso.example.com/realms/mgmt"
+    _SPLIT_TOKEN_ENDPOINT = (
+        "https://sso.example.com/realms/mgmt/protocol/openid-connect/token"
+    )
+
+    def _split_origin_provider(self, port):
+        """A provider for an MCP server whose authorization server lives on
+        another origin (a gateway fronting a separate IdP)."""
+        return mcp2cli.build_oauth_provider(
+            self._SPLIT_SERVER_URL,
+            client_id="gateway-client",
+            redirect_uri=f"http://localhost:{port}/callback",
+            manual_callback=True,
+        )
+
+    def _seed_discovery(self, context):
+        """What the SDK's 401 flow leaves in the context after discovery."""
+        from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+        context.protected_resource_metadata = ProtectedResourceMetadata(
+            resource=self._SPLIT_SERVER_URL,
+            authorization_servers=[self._SPLIT_ISSUER],
+        )
+        context.auth_server_url = self._SPLIT_ISSUER
+        context.oauth_metadata = OAuthMetadata(
+            issuer=self._SPLIT_ISSUER,
+            authorization_endpoint=f"{self._SPLIT_ISSUER}/protocol/openid-connect/auth",
+            token_endpoint=self._SPLIT_TOKEN_ENDPOINT,
+        )
+
+    def test_refresh_after_restart_targets_discovered_token_endpoint(
+        self, tmp_path, monkeypatch
+    ):
+        """A restarted process must refresh against the discovered
+        authorization server, not ``<mcp-origin>/token``.
+
+        Discovery only runs on a 401, while the refresh of an expired token
+        happens before the first request is sent. Unless the discovered
+        metadata survives the restart, the SDK falls back to the resource
+        server's own origin; a gateway answers that with 404, the refresh
+        fails and the user is sent to the browser although the refresh token
+        is still valid."""
+        import time
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        token_body = (
+            b'{"access_token":"a","token_type":"Bearer",'
+            b'"refresh_token":"r","expires_in":300}'
+        )
+
+        first = self._split_origin_provider(19886)
+
+        async def _login():
+            await first._initialize()
+            self._seed_discovery(first.context)
+            await first._handle_token_response(
+                _token_endpoint_response(200, token_body)
+            )
+
+        anyio.run(_login)
+        # The access token has since expired.
+        storage = mcp2cli.FileTokenStorage(self._SPLIT_SERVER_URL)
+        storage._tokens_meta_path.write_text(
+            json.dumps({"expires_at": time.time() - 60})
+        )
+
+        restarted = self._split_origin_provider(19886)
+
+        async def _refresh():
+            await restarted._initialize()
+            assert not restarted.context.is_token_valid()
+            assert restarted.context.can_refresh_token()
+            request = await restarted._refresh_token()
+            assert str(request.url) == self._SPLIT_TOKEN_ENDPOINT
+
+        anyio.run(_refresh)
+
+    def test_restart_restores_protected_resource_binding(self, tmp_path, monkeypatch):
+        """The restored discovery keeps the RFC 8707 resource and the issuer
+        the client is bound to, so the refresh is scoped exactly like the
+        original grant."""
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        first = self._split_origin_provider(19887)
+
+        async def _login():
+            await first._initialize()
+            self._seed_discovery(first.context)
+            await first._handle_token_response(
+                _token_endpoint_response(
+                    200, b'{"access_token":"a","token_type":"Bearer"}'
+                )
+            )
+
+        anyio.run(_login)
+        restarted = self._split_origin_provider(19887)
+
+        async def _check():
+            await restarted._initialize()
+            context = restarted.context
+            assert context.auth_server_url == self._SPLIT_ISSUER
+            assert context.should_include_resource_param(None)
+            assert context.get_resource_url() == self._SPLIT_SERVER_URL
+
+        anyio.run(_check)
+
+    def test_restart_without_persisted_discovery_keeps_legacy_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """Caches written before discovery was persisted still load: no
+        metadata is invented, the SDK keeps its own fallback."""
+        import anyio
+
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+        provider = self._split_origin_provider(19888)
+
+        async def _check():
+            await provider._initialize()
+            assert provider.context.oauth_metadata is None
+            assert provider.context.protected_resource_metadata is None
+            assert provider.context.auth_server_url is None
+
+        anyio.run(_check)
+
 
 class TestRobustClientCredentialsProvider:
     """Behavior of the client-credentials provider subclass (issue #57)."""

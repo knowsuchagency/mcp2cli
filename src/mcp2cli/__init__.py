@@ -1020,6 +1020,12 @@ class FileTokenStorage:
     access token has expired and trigger a refresh, rather than blindly
     re-sending the stale Bearer and falling through to a full re-auth that
     reuses a possibly-forgotten DCR client_id (issue #50).
+
+    Also persists the authorization-server discovery that issued the tokens
+    (in ``discovery.json``). The SDK discovers it only on a 401, yet refreshes
+    an expired token before the first request; without it a fresh process
+    sends the refresh to ``<mcp-origin>/token``, which is wrong whenever the
+    authorization server lives on another origin.
     """
 
     def __init__(self, server_url: str):
@@ -1029,6 +1035,7 @@ class FileTokenStorage:
         self._tokens_path = self._dir / "tokens.json"
         self._tokens_meta_path = self._dir / "tokens_meta.json"
         self._client_path = self._dir / "client.json"
+        self._discovery_path = self._dir / "discovery.json"
 
     async def get_tokens(self):
         from mcp.shared.auth import OAuthToken
@@ -1101,6 +1108,48 @@ class FileTokenStorage:
 
     async def set_client_info(self, client_info) -> None:
         self._client_path.write_text(client_info.model_dump_json())
+
+    def set_discovery(self, context) -> None:
+        """Persist the discovered authorization-server state of ``context``.
+
+        Nothing is written when discovery found no authorization-server
+        metadata: the SDK's own fallback then applies on the next run too.
+        """
+        if context.oauth_metadata is None:
+            return
+        prm = context.protected_resource_metadata
+        data = {
+            "auth_server_url": context.auth_server_url,
+            "oauth_metadata": context.oauth_metadata.model_dump(
+                mode="json", exclude_none=True
+            ),
+            "protected_resource_metadata": (
+                prm.model_dump(mode="json", exclude_none=True) if prm else None
+            ),
+        }
+        self._discovery_path.write_text(json.dumps(data))
+
+    def restore_discovery(self, context) -> None:
+        """Load persisted discovery into ``context``; a missing or corrupt
+        file leaves it untouched, and the next 401 rediscovers."""
+        from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+        if not self._discovery_path.exists():
+            return
+        try:
+            data = json.loads(self._discovery_path.read_text())
+            oauth_metadata = OAuthMetadata.model_validate(data["oauth_metadata"])
+            prm_data = data.get("protected_resource_metadata")
+            prm = (
+                ProtectedResourceMetadata.model_validate(prm_data)
+                if prm_data
+                else None
+            )
+        except Exception:
+            return
+        context.oauth_metadata = oauth_metadata
+        context.protected_resource_metadata = prm
+        context.auth_server_url = data.get("auth_server_url")
 
 
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -1383,11 +1432,28 @@ def build_oauth_provider(
         therefore preserve the persisted OAuth state on anything that isn't a
         clean ``invalid_client``/``invalid_grant`` so a later retry can refresh
         again on its own.
+
+        The SDK also forgets the discovered authorization server across
+        processes, while it refreshes an expired token before discovery can
+        run. We persist the discovery that issued the tokens and restore it
+        here, so the refresh reaches the real token endpoint instead of
+        ``<mcp-origin>/token``.
         """
 
         async def _initialize(self) -> None:
             await super()._initialize()
             _restore_token_expiry_from_sidecar(self.context)
+            storage = self.context.storage
+            if isinstance(storage, FileTokenStorage):
+                storage.restore_discovery(self.context)
+
+        async def _handle_token_response(self, response) -> None:
+            await super()._handle_token_response(response)
+            # Tokens were just issued, so the discovery in context is the
+            # one that issued them; it is what the next process refreshes at.
+            storage = self.context.storage
+            if isinstance(storage, FileTokenStorage):
+                storage.set_discovery(self.context)
 
         @staticmethod
         async def _refresh_failure_is_definitive(response) -> bool:
