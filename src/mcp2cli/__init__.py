@@ -1151,6 +1151,45 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+class OAuthCallbackPortInUseError(RuntimeError):
+    """The loopback port of the OAuth redirect_uri is taken when a login starts.
+
+    Raised before the browser opens, since a redirect to that port could never
+    reach mcp2cli.
+    """
+
+
+class _CallbackHTTPServer(HTTPServer):
+    """The loopback listener that receives one OAuth redirect.
+
+    Binds on construction and raises OSError when the port is taken. The
+    socket is listening on return, so a redirect that arrives before
+    ``handle_request`` runs waits in the backlog instead of being refused.
+    """
+
+    # HTTPServer's SO_REUSEADDR means different things per platform, so
+    # server_bind picks the option itself.
+    allow_reuse_address = False
+
+    def __init__(self, host: str, port: int) -> None:
+        self.address_family = socket.AF_INET6 if host == "::1" else socket.AF_INET
+        super().__init__((host, port), _CallbackHandler)
+
+    def server_bind(self) -> None:
+        if IS_WINDOWS:
+            # Windows SO_REUSEADDR binds over a live listener: a busy port
+            # would go unnoticed and the redirect could reach the other one.
+            # SO_EXCLUSIVEADDRUSE fails the bind instead and keeps others off
+            # ours; Windows needs no SO_REUSEADDR to rebind over TIME_WAIT.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            # POSIX SO_REUSEADDR still fails over a live listener, but lets the
+            # cached port be rebound while the last login's connection is in
+            # TIME_WAIT.
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        super().server_bind()
+
+
 def _parse_oauth_callback_input(text: str) -> tuple[str, str, str | None]:
     """Extract ``(code, state, iss)`` from a pasted OAuth callback URL.
 
@@ -1237,21 +1276,6 @@ def _get_cached_redirect_uri(storage: "FileTokenStorage") -> str | None:
     return None
 
 
-def _port_available(host: str, port: int) -> bool:
-    """Check whether *port* is free on *host*.
-
-    Note: this is a best-effort probe — a TOCTOU race exists where another
-    process could bind the port between this check and the caller's use.
-    Callers must handle bind failures gracefully.
-    """
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, port))
-            return True
-    except OSError:
-        return False
-
-
 def _restore_token_expiry_from_sidecar(context) -> None:
     """Recompute ``token_expiry_time`` from the persisted ``expires_at`` sidecar.
 
@@ -1297,7 +1321,12 @@ def build_oauth_provider(
       client_id and client_secret).
 
     redirect_uri controls the full callback URL (scheme, host, port, path).
-    When None, defaults to http://127.0.0.1:<random-free-port>/callback.
+    When None, the redirect_uri of a cached registration is reused (issue
+    #54), else http://127.0.0.1:<random-free-port>/callback.
+
+    Building the provider binds nothing: the loopback listener is bound only
+    when an interactive login starts, so concurrent invocations that merely
+    use or refresh a token never compete for the callback port.
 
     manual_callback skips the local callback server entirely and reads the
     redirect URL from stdin instead, for hosts where the browser runs on a
@@ -1461,6 +1490,10 @@ def build_oauth_provider(
 
     _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
+    # Whose port is it?  A port mcp2cli chose (cached or random) can be
+    # replaced by re-registering; one the caller fixed cannot.
+    port_chosen_by_caller = redirect_uri is not None
+
     if redirect_uri is not None:
         parsed = urlparse(redirect_uri)
         if parsed.scheme != "http":
@@ -1494,25 +1527,18 @@ def build_oauth_provider(
         # an auth request with a different port causes the auth server to
         # reject the mismatch ("callback URL is invalid").
         #
-        # Fix: reuse the cached redirect_uri if its port is still available.
-        # If the cached port is occupied (unlikely for loopback), clear the
-        # stale client so DCR re-registers with the fresh port.
+        # Fix: reuse the cached redirect_uri whatever the port's state right
+        # now.  A busy port here usually means a parallel mcp2cli run for the
+        # same server is logging in; discarding the registration because of
+        # it would orphan tokens.json (no client_info, no refresh).  Whether
+        # the port is free only matters once a login needs a listener, so
+        # redirect_handler decides then.
         cached_uri = _get_cached_redirect_uri(storage)
-        if cached_uri is not None:
-            from urllib.parse import urlparse as _urlparse
-            _parsed = _urlparse(cached_uri)
-            _cached_port = _parsed.port
-            _cached_host = _parsed.hostname or "127.0.0.1"
-            if _cached_port and _port_available(_cached_host, _cached_port):
-                callback_host = _cached_host
-                port = _cached_port
-                redirect_uri = cached_uri
-            else:
-                # Port no longer free — clear stale client and re-register
-                storage.clear_client_info()
-                port = _find_free_port()
-                callback_host = "127.0.0.1"
-                redirect_uri = f"http://127.0.0.1:{port}/callback"
+        cached = urlparse(cached_uri or "")
+        if cached_uri is not None and cached.port:
+            callback_host = cached.hostname or "127.0.0.1"
+            port = cached.port
+            redirect_uri = cached_uri
         else:
             port = _find_free_port()
             callback_host = "127.0.0.1"
@@ -1571,37 +1597,62 @@ def build_oauth_provider(
             code, state, iss = await anyio.to_thread.run_sync(_prompt_oauth_callback)
             return _authorization_code_result(code, state, iss)
     else:
-        # Reset callback handler state
-        _CallbackHandler.auth_code = None
-        _CallbackHandler.state = None
-        _CallbackHandler.iss = None
-        _CallbackHandler.error = None
-        _CallbackHandler.done = threading.Event()
-
-        if callback_host == "::1":
-            import socket as _socket
-
-            class _IPv6HTTPServer(HTTPServer):
-                address_family = _socket.AF_INET6
-
-            server = _IPv6HTTPServer((callback_host, port), _CallbackHandler)
-        else:
-            server = HTTPServer((callback_host, port), _CallbackHandler)
+        # The listener is bound per login, never at build time: most
+        # invocations only use or refresh a token, and a socket held for the
+        # whole run makes parallel runs for the same server collide on the
+        # callback port.  redirect_handler binds it before opening the browser
+        # and hands it to callback_handler, which serves one redirect and
+        # closes it.
+        server: _CallbackHTTPServer | None = None
 
         async def redirect_handler(auth_url: str) -> None:
-            print("Opening browser for authorization...", file=sys.stderr)
-            print(f"If browser doesn't open, visit: {auth_url}", file=sys.stderr)
-            webbrowser.open(auth_url)
+            nonlocal server
+            _CallbackHandler.auth_code = None
+            _CallbackHandler.state = None
+            _CallbackHandler.iss = None
+            _CallbackHandler.error = None
+            _CallbackHandler.done = threading.Event()
+            try:
+                listener = _CallbackHTTPServer(callback_host, port)
+            except OSError as exc:
+                if port_chosen_by_caller:
+                    # Re-registering would land on the same fixed port, so
+                    # the registration (DCR or --oauth-client-id) is kept.
+                    hint = "Free it or pass another --oauth-redirect-uri, then retry."
+                else:
+                    # The registration is pinned to a port something else
+                    # holds (issue #54): drop it so the next run registers a
+                    # fresh port. tokens.json is left for the next login to
+                    # replace.
+                    storage.clear_client_info()
+                    hint = "Retry; the next run registers a new callback port."
+                raise OAuthCallbackPortInUseError(
+                    f"OAuth callback port {port} on {callback_host} is in use "
+                    f"({exc.strerror}), possibly by another mcp2cli login. {hint}"
+                ) from exc
+            try:
+                print("Opening browser for authorization...", file=sys.stderr)
+                print(f"If browser doesn't open, visit: {auth_url}", file=sys.stderr)
+                webbrowser.open(auth_url)
+            except BaseException:
+                listener.server_close()
+                raise
+            server = listener
 
         async def callback_handler():
-            # Run the HTTP server in a thread, wait for the callback
-            thread = threading.Thread(target=server.handle_request, daemon=True)
-            thread.start()
-            # Wait with timeout
-            if not _CallbackHandler.done.wait(timeout=300):
-                server.server_close()
-                raise TimeoutError("OAuth callback timed out after 5 minutes")
-            server.server_close()
+            nonlocal server
+            if server is None:
+                raise RuntimeError("OAuth callback requested before the login started")
+            listener, server = server, None
+            try:
+                # Run the HTTP server in a thread, wait for the callback
+                thread = threading.Thread(target=listener.handle_request, daemon=True)
+                thread.start()
+                # Wait with timeout
+                if not _CallbackHandler.done.wait(timeout=300):
+                    raise TimeoutError("OAuth callback timed out after 5 minutes")
+            finally:
+                listener.server_close()
             if _CallbackHandler.error:
                 raise RuntimeError(f"OAuth error: {_CallbackHandler.error}")
             if not _CallbackHandler.auth_code:
