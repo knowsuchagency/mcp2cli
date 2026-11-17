@@ -56,6 +56,34 @@ mcp2cli --mcp https://mcp.example.com/sse --search "task"
 
 `--search` implies `--list` and works across all modes (`--mcp`, `--spec`, `--graphql`, `--mcp-stdio`).
 
+#### Public documentation lookup with Parallel
+
+For a runnable remote MCP example, use Parallel's hosted server to find public
+documentation. Web search works without a Parallel API key, subject to service
+limits; see [Parallel MCP setup](https://docs.parallel.ai/integrations/mcp/quickstart).
+These commands send the objective and query you enter to Parallel, so use only
+public queries you intend to share with the service.
+
+```bash
+# Discover the search tool, then inspect its generated CLI flags
+mcp2cli --mcp https://mcp.parallel.ai/mcp --transport streamable --search web-search --json
+mcp2cli --mcp https://mcp.parallel.ai/mcp --transport streamable web-search --help
+
+# Run one public documentation lookup (array arguments use JSON)
+mcp2cli --mcp https://mcp.parallel.ai/mcp --transport streamable --json \
+  web-search --objective "Find the official Python documentation for tomllib.loads." \
+  --search-queries '["site:docs.python.org tomllib loads documentation"]'
+```
+
+This follows the agent skill's discover, inspect, and execute workflow. `--search`
+filters the tool list locally; `web-search` performs the remote lookup. `--json`
+keeps the full MCP result envelope, including `isError`, `content`, and
+`structuredContent`. Read `structuredContent.results[].url` for the original
+source URLs and preserve them when citing results in the agent's response.
+The server also includes the search payload as JSON in text content. Check the
+command's exit status and `isError` before using results; if `results` is empty,
+report that no sources were found.
+
 ### OAuth authentication
 
 APIs that require OAuth are supported out of the box — across MCP, OpenAPI, and GraphQL modes.
