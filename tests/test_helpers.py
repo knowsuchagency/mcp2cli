@@ -422,6 +422,25 @@ class TestResolveRefs:
         # Should not infinite loop — returns node with $ref intact
         assert "$ref" in resolved["a"] or "$ref" in resolved["b"]
 
+    def test_operation_responses_left_unresolved(self):
+        spec = {
+            "paths": {
+                "/x": {
+                    "get": {
+                        "parameters": [{"$ref": "#/components/parameters/P"}],
+                        "responses": {"200": {"$ref": "#/components/responses/R"}},
+                    }
+                }
+            },
+            "components": {
+                "parameters": {"P": {"name": "p", "in": "query"}},
+                "responses": {"R": {"description": "ok"}},
+            },
+        }
+        op = resolve_refs(spec)["paths"]["/x"]["get"]
+        assert op["parameters"][0]["name"] == "p"
+        assert op["responses"]["200"] == {"$ref": "#/components/responses/R"}
+
 
 class TestExtractOpenAPICommands:
     def test_command_count(self, petstore_spec):

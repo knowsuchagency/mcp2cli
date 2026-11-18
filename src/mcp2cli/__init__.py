@@ -1723,7 +1723,24 @@ def resolve_refs(spec: dict) -> dict:
             return [_resolve(item, root, seen) for item in node]
         return node
 
-    return _resolve(spec, spec, set())
+    # Only operations are read after loading. Their responses are skipped:
+    # inlining them on a densely linked spec (Stripe) grows without bound.
+    paths = spec.get("paths") or {}
+    for path, item in paths.items():
+        if not isinstance(item, dict):
+            continue
+        if "$ref" in item:
+            paths[path] = _resolve(item, spec, set())
+            continue
+        for key, value in item.items():
+            if key in _OPENAPI_METHODS and isinstance(value, dict):
+                item[key] = {
+                    k: v if k == "responses" else _resolve(v, spec, set())
+                    for k, v in value.items()
+                }
+            else:
+                item[key] = _resolve(value, spec, set())
+    return spec
 
 
 # ---------------------------------------------------------------------------
