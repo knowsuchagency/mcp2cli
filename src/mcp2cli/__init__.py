@@ -3473,6 +3473,7 @@ def execute_openapi(
     oauth_provider: "httpx.Auth | None" = None,
     head: int | None = None,
     json_output: bool = False,
+    follow_redirects: bool = False,
 ):
     path, query_params, extra_headers, body, files = _collect_openapi_params(cmd, args)
     url = base_url.rstrip("/") + path
@@ -3489,8 +3490,19 @@ def execute_openapi(
     headers = _build_http_headers(auth_headers, multipart=is_multipart)
     headers.update(extra_headers)
 
+    origin = httpx.URL(url)
+
+    def strip_cross_origin_auth(request: httpx.Request):
+        target = request.url
+        if (target.scheme, target.host, target.port) != (origin.scheme, origin.host, origin.port):
+            for name, _ in auth_headers:
+                request.headers.pop(name, None)
+
     try:
-        with httpx.Client(timeout=60, auth=oauth_provider) as client:
+        with httpx.Client(
+            timeout=60, auth=oauth_provider, follow_redirects=follow_redirects,
+            event_hooks={"request": [strip_cross_origin_auth]} if follow_redirects else None,
+        ) as client:
             if files is not None:
                 resp = client.request(
                     (cmd.method or "get").upper(),
@@ -5229,6 +5241,10 @@ def _build_main_parser() -> argparse.ArgumentParser:
         help="HTTP header as Name:Value (repeatable). Value supports env:VAR and file:/path prefixes",
     )
     pre.add_argument("--base-url", default=None, help="Override base URL from spec")
+    pre.add_argument(
+        "--follow-redirects", action="store_true",
+        help="Follow HTTP redirects for OpenAPI requests",
+    )
     pre.add_argument("--cache-key", default=None, help="Custom cache key")
     pre.add_argument(
         "--cache-ttl", type=int, default=DEFAULT_CACHE_TTL, help="Cache TTL in seconds"
@@ -5853,6 +5869,7 @@ def _handle_openapi_mode(
         args, cmd, base_url, auth_headers,
         pre_args.pretty, pre_args.raw, toon=pre_args.toon,
         oauth_provider=oauth_provider, json_output=pre_args.json_output,
+        follow_redirects=pre_args.follow_redirects,
     )
 
     # Record usage after successful execution

@@ -364,12 +364,17 @@ Indentation follows the usual rule: pretty on a TTY or with `--pretty`, compact 
 
 ### Output control
 
+`--follow-redirects` is opt-in for OpenAPI requests. Explicit `--auth-header` values are removed when a redirect changes the scheme, host or port.
+
 ```bash
 # Pretty-print JSON (also auto-enabled for TTY)
 mcp2cli --spec ./spec.json --pretty list-pets
 
 # Raw response body (no JSON parsing)
 mcp2cli --spec ./spec.json --raw get-data
+
+# Follow redirects when an OpenAPI download endpoint redirects to a file host
+mcp2cli --spec ./spec.json --follow-redirects --raw download-archive > archive.zip
 
 # Truncate large responses to first N records
 mcp2cli --spec ./spec.json --head 5 list-records
