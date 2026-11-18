@@ -475,8 +475,8 @@ class TestCollectMultipartParams:
 
         assert body == {"caption": "my photo"}
         assert files is not None
-        assert "file" in files
-        name, fh, mime = files["file"]
+        assert files[0][0] == "file"
+        name, fh, mime = files[0][1]
         assert name == "photo.png"
         assert mime == "image/png"
         fh.close()

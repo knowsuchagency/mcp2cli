@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 import webbrowser
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -1853,6 +1853,14 @@ def _unique_openapi_name(
         suffix += 1
 
 
+def _is_multipart_file(schema: dict) -> bool:
+    """Recognize a binary part or an array of binary parts."""
+    schema = _collapse_nullable(schema)
+    if _normalize_schema_type(schema.get("type")) == "array":
+        schema = _collapse_nullable(schema.get("items", {}))
+    return schema.get("format") == "binary"
+
+
 def extract_openapi_commands(spec: dict) -> list[CommandDef]:
     commands: list[CommandDef] = []
     natural_names = _openapi_natural_names(spec)
@@ -1916,7 +1924,7 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
 
             mp_props = multipart_schema.get("properties", {})
             has_binary = any(
-                p.get("format") == "binary" for p in mp_props.values()
+                _is_multipart_file(p) for p in mp_props.values()
             )
 
             if has_binary:
@@ -1940,10 +1948,12 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
                 prop_schema = _collapse_nullable(prop_schema)
                 is_binary = (
                     cmd_content_type == "multipart/form-data"
-                    and prop_schema.get("format") == "binary"
+                    and _is_multipart_file(prop_schema)
                 )
                 if is_binary:
                     loc, py_type, suffix = "file", str, " (file path)"
+                    if _normalize_schema_type(prop_schema.get("type")) == "array":
+                        suffix = " (file path; repeat for multiple files)"
                 else:
                     py_type, suffix = schema_type_to_python(prop_schema)
                     loc = "body"
@@ -3208,10 +3218,12 @@ def build_argparse(
             else:
                 # --<name> sends true, --no-<name> sends false, omitted sends nothing.
                 kwargs["action"] = argparse.BooleanOptionalAction
+            if p.location == "file" and _normalize_schema_type(p.schema.get("type")) == "array":
+                kwargs["action"] = "append"
             # Body/tool_input params are never argparse-required (--stdin bypasses them)
             if (
                 p.required
-                and "action" not in kwargs
+                and kwargs.get("action") in (None, "append")
                 and p.location not in ("body", "tool_input", "graphql_arg")
             ):
                 kwargs["required"] = True
@@ -3376,7 +3388,7 @@ def _serialize_openapi_path_param(value, param: ParamDef) -> str:
 def _collect_openapi_params(
     cmd: CommandDef,
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], dict[str, str], dict | None, dict | None]:
+) -> tuple[str, dict[str, str], dict[str, str], dict | None, list | None]:
     """Collect OpenAPI params from parsed args, separated by location.
 
     Returns (path, query_params, extra_headers, body_or_none, files_or_none)
@@ -3386,7 +3398,7 @@ def _collect_openapi_params(
     query_params: dict[str, str] = {}
     extra_headers: dict[str, str] = {}
     body: dict | None = None
-    files: dict | None = None
+    files: list | None = None
 
     for p in cmd.params:
         if p.location == "path":
@@ -3408,32 +3420,38 @@ def _collect_openapi_params(
         elif p.location == "header":
             extra_headers[p.original_name] = str(val)
 
-    if cmd.method != "get":
-        body = resolve_json_input(args, cmd, "OpenAPI request body")
-        if body is None:
-            body = {}
-            for p in cmd.params:
-                if p.location in ("path", "query", "header", "cookie"):
-                    # Path values travel in the URL, query and header values are
-                    # collected above, and a cookie parameter is not a body field
-                    # either. None of them belong in the JSON payload.
-                    continue
-                val = getattr(args, _param_dest(p), None)
-                if p.location == "file":
+    with ExitStack() as files_stack:
+        if cmd.method != "get":
+            body = resolve_json_input(args, cmd, "OpenAPI request body")
+            if body is None:
+                body = {}
+                for p in cmd.params:
+                    if p.location in ("path", "query", "header", "cookie"):
+                        # Path values travel in the URL, query and header values are
+                        # collected above, and a cookie parameter is not a body field
+                        # either. None of them belong in the JSON payload.
+                        continue
+                    val = getattr(args, _param_dest(p), None)
+                    if p.location == "file":
+                        if val is not None:
+                            paths = val if isinstance(val, list) else [val]
+                            for file_path in paths:
+                                fp = Path(file_path)
+                                if not fp.is_file():
+                                    print(f"Error: file not found: {file_path}", file=sys.stderr)
+                                    sys.exit(1)
+                                mime = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+                                if files is None:
+                                    files = []
+                                handle = files_stack.enter_context(open(fp, "rb"))
+                                files.append((p.original_name, (fp.name, handle, mime)))
+                        continue
                     if val is not None:
-                        fp = Path(val)
-                        if not fp.is_file():
-                            print(f"Error: file not found: {val}", file=sys.stderr)
-                            sys.exit(1)
-                        mime = mimetypes.guess_type(val)[0] or "application/octet-stream"
-                        if files is None:
-                            files = {}
-                        files[p.original_name] = (fp.name, open(fp, "rb"), mime)
-                    continue
-                if val is not None:
-                    body[p.original_name] = coerce_value(val, p.schema)
-            if not body:
-                body = None
+                        body[p.original_name] = coerce_value(val, p.schema)
+                if not body:
+                    body = None
+
+        files_stack.pop_all()
 
     return path, query_params, extra_headers, body, files
 
@@ -3516,7 +3534,7 @@ def execute_openapi(
             _handle_http_error(resp)
     finally:
         if files:
-            for _, file_tuple in files.items():
+            for _, file_tuple in files:
                 file_tuple[1].close()
 
     if json_output:

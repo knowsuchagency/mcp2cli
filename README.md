@@ -332,6 +332,19 @@ mcp2cli @myapi --list --sort alpha
 
 When usage data exists for a source, `--list` defaults to sorting by call frequency. Otherwise insertion order is preserved. Usage data is stored in `~/.cache/mcp2cli/usage.json`.
 
+### Batch file uploads
+
+For OpenAPI multipart fields declared as an array of binary strings, repeat the
+field's flag to send multiple files under the same multipart name:
+
+```bash
+mcp2cli --spec ./api.json ingest-documents \
+  --files ./deployment.md --files "./incident notes.md" --collection research
+```
+
+Each path is uploaded as its own file part. Ordinary multipart fields, such as
+`--collection`, can be supplied alongside the files.
+
 ### JSON output
 
 `--json` forces **valid JSON on stdout for every command**, in every mode. It is the
