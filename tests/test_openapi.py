@@ -953,3 +953,60 @@ class TestStrictBodySchemaOnTheWire:
             "--no-archived": {"archived": "false"},
             "--archived": {"archived": "true"},
         }
+
+
+def test_form_urlencoded_body_is_sent_as_form(tmp_path):
+    class Echo(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"] or 0)).decode()
+            payload = json.dumps({"type": self.headers["Content-Type"], "body": body}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Echo)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "form", "version": "1"},
+            "servers": [{"url": f"http://127.0.0.1:{server.server_port}"}],
+            "paths": {
+                "/messages": {
+                    "post": {
+                        "operationId": "createMessage",
+                        "requestBody": {
+                            "content": {
+                                "application/x-www-form-urlencoded": {
+                                    "schema": {
+                                        "type": "object",
+                                        "required": ["To"],
+                                        "properties": {"To": {"type": "string"}, "Body": {"type": "string"}},
+                                    }
+                                }
+                            }
+                        },
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                }
+            },
+        }
+        spec_path = tmp_path / "openapi.json"
+        spec_path.write_text(json.dumps(spec))
+        result = subprocess.run(
+            [sys.executable, "-m", "mcp2cli", "--spec", str(spec_path), "--json",
+             "create-message", "--to", "+15550100", "--body", "hi there"],
+            capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["type"] == "application/x-www-form-urlencoded"
+        assert data["body"] == "To=%2B15550100&Body=hi+there"
+    finally:
+        server.shutdown()
+        server.server_close()

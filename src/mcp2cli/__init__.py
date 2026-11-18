@@ -1913,6 +1913,9 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
             rb_content = details.get("requestBody", {}).get("content", {})
             multipart_schema = rb_content.get("multipart/form-data", {}).get("schema", {})
             json_schema = rb_content.get("application/json", {}).get("schema", {})
+            form_schema = rb_content.get(
+                "application/x-www-form-urlencoded", {}
+            ).get("schema", {})
 
             mp_props = multipart_schema.get("properties", {})
             has_binary = any(
@@ -1928,6 +1931,9 @@ def extract_openapi_commands(spec: dict) -> list[CommandDef]:
             elif mp_props:
                 rb_schema = multipart_schema
                 cmd_content_type = "multipart/form-data"
+            elif form_schema.get("properties"):
+                rb_schema = form_schema
+                cmd_content_type = "application/x-www-form-urlencoded"
             else:
                 rb_schema = {}
                 cmd_content_type = None
@@ -3485,8 +3491,11 @@ def execute_openapi(
             query = parsed.query + b"&" + query
         url = parsed.copy_with(query=query)
 
-    is_multipart = files is not None or cmd.content_type == "multipart/form-data"
-    headers = _build_http_headers(auth_headers, multipart=is_multipart)
+    is_form = files is not None or cmd.content_type in (
+        "multipart/form-data",
+        "application/x-www-form-urlencoded",
+    )
+    headers = _build_http_headers(auth_headers, multipart=is_form)
     headers.update(extra_headers)
 
     try:
@@ -3499,7 +3508,7 @@ def execute_openapi(
                     data=body,
                     files=files,
                 )
-            elif cmd.content_type == "multipart/form-data":
+            elif is_form:
                 resp = client.request(
                     (cmd.method or "get").upper(),
                     url,
