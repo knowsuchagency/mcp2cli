@@ -45,7 +45,7 @@ class TestMCPStdio:
         return subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input=stdin_data,
             timeout=30,
         )
@@ -441,7 +441,7 @@ class TestMCPHTTP:
             url,
             *args,
         ]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
     def test_list_tools_http(self, mcp_http_server):
         r = self._run(mcp_http_server, "--list")
@@ -530,7 +530,7 @@ class TestSessions:
                 name,
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=30,
         )
         assert r.returncode == 0
@@ -541,7 +541,7 @@ class TestSessions:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-list"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -561,7 +561,7 @@ class TestSessions:
                     "via session",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -571,7 +571,7 @@ class TestSessions:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session", name, "--list"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -588,7 +588,7 @@ class TestSessions:
                     "--list-resources",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -599,7 +599,7 @@ class TestSessions:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session", name, "--list-prompts"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -618,7 +618,7 @@ class TestSessions:
                     "greeting:name=San",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -639,7 +639,7 @@ class TestSessions:
                     "client-roots",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -655,7 +655,7 @@ class TestSessions:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-stop", name],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -664,7 +664,7 @@ class TestSessions:
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--session-list"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
         )
         assert name not in r.stdout or "dead" in r.stdout
@@ -685,7 +685,7 @@ class TestSessions:
                 name,
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=30,
         )
 
@@ -695,7 +695,7 @@ class TestSessions:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session", name, "fail"],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode != 0
@@ -713,7 +713,7 @@ class TestSessions:
                     "fail",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert machine.returncode != 0
@@ -729,7 +729,7 @@ class TestSessions:
                     "struct-only",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert structured.returncode == 0
@@ -748,7 +748,7 @@ class TestSessions:
                     "still fine",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
             assert r.returncode == 0
@@ -757,7 +757,7 @@ class TestSessions:
             subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-stop", name],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8",
                 timeout=10,
             )
 
@@ -771,7 +771,7 @@ class TestConnectionErrors:
         return subprocess.run(
             [sys.executable, "-m", "mcp2cli", *args],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=30,
             env=env,
         )
@@ -840,7 +840,7 @@ class TestConnectionErrors:
                 "--transport", "streamable",
             ],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=30,
             env=env,
         )

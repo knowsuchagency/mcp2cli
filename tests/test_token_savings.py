@@ -335,7 +335,7 @@ class TestOpenAPITokenSavings:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--spec", str(spec_file),
                  "--base-url", "http://unused", "--list"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", timeout=15,
             )
             assert r.returncode == 0
             list_output = r.stdout.strip()
@@ -364,7 +364,7 @@ class TestOpenAPITokenSavings:
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--spec", str(spec_file),
                  "--base-url", "http://unused", "create-pet", "--help"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", timeout=15,
             )
             assert r.returncode == 0
             help_output = r.stdout.strip()

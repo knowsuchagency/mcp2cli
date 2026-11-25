@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 
 import pytest
@@ -302,6 +303,20 @@ class TestApplyHead:
         assert _apply_head([1, 2], 10) == [1, 2]
 
 
+@pytest.fixture(scope="module")
+def installed_toon_cli():
+    cli = _find_toon_cli()
+    if cli is None:
+        pytest.skip("TOON CLI not available")
+    try:
+        probe = subprocess.run((*cli, "--version"), capture_output=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pytest.skip("TOON CLI not available")
+    if probe.returncode != 0:
+        pytest.skip("TOON CLI not available locally (automatic download disabled)")
+    return cli
+
+
 class TestToonEncode:
     def test_find_toon_cli_prefers_installed_binary(self, monkeypatch):
         """A real `toon` on PATH is used directly, without involving npx."""
@@ -325,12 +340,8 @@ class TestToonEncode:
         monkeypatch.setattr(shutil, "which", lambda cmd: None)
         assert _find_toon_cli() is None
 
-    def test_toon_encode_uniform_array(self):
+    def test_toon_encode_uniform_array(self, installed_toon_cli):
         """TOON CLI encodes a uniform array into tabular format."""
-        cli = _find_toon_cli()
-        if cli is None:
-            import pytest
-            pytest.skip("TOON CLI not available")
         data = json.dumps([
             {"name": "Alice", "age": 30},
             {"name": "Bob", "age": 25},
@@ -342,17 +353,46 @@ class TestToonEncode:
         # Should NOT look like JSON (TOON uses {fields} in headers, so check for JSON-specific patterns)
         assert '"name"' not in result
 
-    def test_toon_encode_single_object(self):
+    def test_toon_encode_single_object(self, installed_toon_cli):
         """TOON CLI encodes a single object in YAML-like format."""
-        cli = _find_toon_cli()
-        if cli is None:
-            import pytest
-            pytest.skip("TOON CLI not available")
         data = json.dumps({"status": "ok", "count": 42})
         result = _toon_encode(data)
         assert result is not None
         assert "ok" in result
         assert "42" in result
+
+    def test_toon_encode_decodes_utf8_output(self, monkeypatch):
+        """Decode UTF-8 independently of the console code page."""
+        monkeypatch.setattr(
+            "mcp2cli._find_toon_cli",
+            lambda: (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xe2\\x80\\x94')",
+            ),
+        )
+        assert _toon_encode("{}") == "—"
+
+    @pytest.mark.parametrize("stream", ["stdout", "stderr"])
+    def test_toon_invalid_utf8_does_not_raise(self, monkeypatch, stream):
+        monkeypatch.setattr(
+            "mcp2cli._find_toon_cli",
+            lambda: (
+                sys.executable, "-c",
+                f"import sys; sys.{stream}.buffer.write(bytes([255]))",
+            ),
+        )
+        result = _toon_encode("{}")
+        assert result == (None if stream == "stdout" else "")
+
+    def test_toon_input_is_utf8(self, monkeypatch):
+        monkeypatch.setattr(
+            "mcp2cli._find_toon_cli",
+            lambda: (sys.executable, "-c",
+                     "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"),
+        )
+        data = json.dumps({"name": "测试 — café"}, ensure_ascii=False)
+        assert _toon_encode(data) == data
 
 
 class TestCaching:

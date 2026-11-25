@@ -292,7 +292,7 @@ def _run(args, input_data=None, env=None):
     result = subprocess.run(
         cmd,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         timeout=30,
         input=input_data,
         env=env,

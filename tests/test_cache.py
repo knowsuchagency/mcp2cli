@@ -77,7 +77,7 @@ def _run_cli(*args, cache_dir=None, stdin_data=None):
         # We can't monkeypatch a subprocess, so we inject via env
         env["MCP2CLI_CACHE_DIR"] = str(cache_dir)
     return subprocess.run(
-        cmd, capture_output=True, text=True, input=stdin_data, timeout=15, env=env,
+        cmd, capture_output=True, text=True, encoding="utf-8", input=stdin_data, timeout=15, env=env,
     )
 
 

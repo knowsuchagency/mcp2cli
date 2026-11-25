@@ -1303,7 +1303,7 @@ def mcp_http_server():
         [sys.executable, str(script)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding="utf-8",
     )
     port = None
     deadline = time.time() + 10
