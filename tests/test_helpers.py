@@ -327,10 +327,8 @@ class TestToonEncode:
 
     def test_toon_encode_uniform_array(self):
         """TOON CLI encodes a uniform array into tabular format."""
-        cli = _find_toon_cli()
-        if cli is None:
-            import pytest
-            pytest.skip("TOON CLI not available")
+        if shutil.which("toon") is None:
+            pytest.skip("Install the optional TOON CLI to run this integration test")
         data = json.dumps([
             {"name": "Alice", "age": 30},
             {"name": "Bob", "age": 25},
@@ -344,15 +342,25 @@ class TestToonEncode:
 
     def test_toon_encode_single_object(self):
         """TOON CLI encodes a single object in YAML-like format."""
-        cli = _find_toon_cli()
-        if cli is None:
-            import pytest
-            pytest.skip("TOON CLI not available")
+        if shutil.which("toon") is None:
+            pytest.skip("Install the optional TOON CLI to run this integration test")
         data = json.dumps({"status": "ok", "count": 42})
         result = _toon_encode(data)
         assert result is not None
         assert "ok" in result
         assert "42" in result
+
+    def test_toon_encode_decodes_utf8_output(self, monkeypatch):
+        """Decode UTF-8 independently of the console code page."""
+        monkeypatch.setattr(
+            "mcp2cli._find_toon_cli",
+            lambda: (
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write(b'\\xe2\\x80\\x94')",
+            ),
+        )
+        assert _toon_encode("{}") == "—"
 
 
 class TestCaching:

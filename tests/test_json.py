@@ -168,7 +168,7 @@ class TestOpenAPIJson:
             "--base-url", f"{petstore_server}/api/v1",
             *args,
         ]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=15)
 
     def test_list_json(self, petstore_server):
         r = self._run(petstore_server, "--list", "--json")
@@ -209,7 +209,7 @@ class TestMCPStdioJson:
             "--mcp-stdio", f"{sys.executable} {MCP_SERVER}",
             *args,
         ]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
     def test_list_json(self):
         r = self._run("--list", "--json")
@@ -257,7 +257,7 @@ class TestMCPStdioJson:
 class TestMCPHttpJson:
     def _run(self, url, *args):
         cmd = [sys.executable, "-m", "mcp2cli", "--mcp", url, *args]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
     def test_list_json(self, mcp_http_server):
         r = self._run(mcp_http_server, "--list", "--json")
@@ -282,7 +282,7 @@ class TestMCPHttpJson:
 
 def _run_gql(args):
     cmd = [sys.executable, "-m", "mcp2cli"] + args
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
 
 class TestGraphQLJson:

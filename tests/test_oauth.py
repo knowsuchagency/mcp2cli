@@ -610,7 +610,9 @@ class TestBuildOAuthProvider:
         """When redirect_uri is given the provider uses it verbatim."""
         from mcp.client.auth.oauth2 import OAuthClientProvider
 
-        custom_uri = "http://localhost:19876/oauth/callback"
+        # Fixed ports can be reserved or occupied on the test host.
+        port = mcp2cli._find_free_port()
+        custom_uri = f"http://127.0.0.1:{port}/oauth/callback"
         provider = mcp2cli.build_oauth_provider(
             "https://example.com/mcp",
             redirect_uri=custom_uri,
@@ -618,6 +620,22 @@ class TestBuildOAuthProvider:
         assert isinstance(provider, OAuthClientProvider)
         redirect_uris = [str(u) for u in provider.context.client_metadata.redirect_uris]
         assert custom_uri in redirect_uris
+
+    def test_callback_port_unavailable_reports_clear_error(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """A denied callback port names the flags that work around it."""
+        monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+
+        class DeniedHTTPServer:
+            def __init__(self, *args, **kwargs):
+                raise PermissionError(10013, "port denied")
+
+        monkeypatch.setattr(mcp2cli, "HTTPServer", DeniedHTTPServer)
+        with pytest.raises(SystemExit) as excinfo:
+            mcp2cli.build_oauth_provider("https://example.com/mcp")
+        assert excinfo.value.code == 1
+        assert "--oauth-manual-callback" in capsys.readouterr().err
 
     def test_redirect_uri_https_rejected(self):
         with pytest.raises(SystemExit):
@@ -760,17 +778,112 @@ class TestBuildOAuthProvider:
         assert 1024 <= port <= 65535
 
 
+@pytest.mark.parametrize("expired", [False, True])
+@pytest.mark.parametrize("operation", ["openapi-schema", "graphql-schema", "openapi-call", "graphql-call"])
+def test_oauth_http_requests_use_sdk_auth(
+    operation, expired, tmp_path, monkeypatch, capsys, petstore_spec, graphql_schema,
+):
+    import argparse
+    import anyio
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+    from mcp.shared import _httpx_utils
+
+    sdk_httpx = _sdk_httpx()
+    monkeypatch.setattr(mcp2cli, "OAUTH_DIR", tmp_path / "oauth")
+    monkeypatch.setattr(mcp2cli, "CACHE_DIR", tmp_path / "cache")
+    url = "https://example.com/api"
+    storage = mcp2cli.FileTokenStorage(url)
+
+    async def seed():
+        await storage.set_client_info(OAuthClientInformationFull(
+            client_id="test-client", redirect_uris=["http://127.0.0.1:19876/callback"],
+        ))
+        await storage.set_tokens(OAuthToken(
+            access_token="old-token", token_type="Bearer",
+            refresh_token="refresh-token", expires_in=3600,
+        ))
+
+    anyio.run(seed)
+    if expired:
+        storage._tokens_meta_path.write_text(json.dumps({"expires_at": 1}))
+    provider = mcp2cli.build_oauth_provider(
+        url, redirect_uri="http://127.0.0.1:19876/callback", manual_callback=True,
+    )
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if request.url.path == "/token":
+            assert b"grant_type=refresh_token" in request.content
+            assert b"refresh_token=refresh-token" in request.content
+            return sdk_httpx.Response(200, json={
+                "access_token": "new-token", "token_type": "Bearer", "expires_in": 3600,
+            })
+        expected_token = "new-token" if expired else "old-token"
+        assert request.headers["Authorization"] == f"Bearer {expected_token}"
+        if operation == "openapi-schema":
+            return sdk_httpx.Response(200, json=petstore_spec)
+        if operation == "graphql-schema":
+            assert "__schema" in json.loads(request.content)["query"]
+            return sdk_httpx.Response(200, json={"data": {"__schema": graphql_schema}})
+        if operation == "openapi-call":
+            assert request.url.params["tag"] == "a b"
+            return sdk_httpx.Response(200, json={"ok": True})
+        assert "status" in json.loads(request.content)["query"]
+        return sdk_httpx.Response(200, json={"data": {"status": "ready"}})
+
+    monkeypatch.setattr(
+        _httpx_utils, "create_mcp_http_client",
+        lambda **kwargs: sdk_httpx.AsyncClient(
+            transport=sdk_httpx.MockTransport(respond), **kwargs,
+        ),
+    )
+    if operation == "openapi-schema":
+        assert mcp2cli.load_openapi_spec(url, [], None, 0, True, provider)["paths"]
+    elif operation == "graphql-schema":
+        assert mcp2cli.load_graphql_schema(url, [], None, 0, True, provider) == graphql_schema
+    elif operation == "openapi-call":
+        cmd = mcp2cli.CommandDef(name="status", method="get", path="/api", params=[
+            mcp2cli.ParamDef("tag", "tag", str, location="query"),
+        ])
+        args = argparse.Namespace(tag="a b")
+        mcp2cli.execute_openapi(args, cmd, "https://example.com", [], False, False,
+                               oauth_provider=provider, json_output=True)
+        assert json.loads(capsys.readouterr().out) == {"ok": True}
+    else:
+        cmd = mcp2cli.CommandDef(
+            name="status", graphql_operation_type="query", graphql_field_name="status",
+            graphql_return_type={"kind": "SCALAR", "name": "String"},
+        )
+        mcp2cli.execute_graphql(argparse.Namespace(), cmd, url, graphql_schema,
+                               [], False, False, oauth_provider=provider, json_output=True)
+        assert json.loads(capsys.readouterr().out) == "ready"
+    assert len(calls) == (2 if expired else 1)
+    assert str(calls[-1].url).startswith(url)
+    if expired:
+        assert anyio.run(storage.get_tokens).access_token == "new-token"
+
+
+@pytest.mark.parametrize("status", [302, 403, 500])
+def test_sdk_http_errors_remain_readable(status, capsys):
+    response = _sdk_httpx().Response(status, text="request rejected")
+    with pytest.raises(SystemExit) as excinfo:
+        mcp2cli._handle_http_error(response)
+    assert excinfo.value.code == 1
+    assert f"Error {status}: request rejected" in capsys.readouterr().err
+
+
 class TestOAuthCLIValidation:
     """Tests for OAuth CLI argument validation."""
 
     def _run(self, *args) -> subprocess.CompletedProcess:
         cmd = [sys.executable, "-m", "mcp2cli", *args]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
 
-    def test_client_id_without_secret_accepted(self):
+    def test_client_id_without_secret_accepted(self, mcp_http_server):
         """--oauth-client-id alone is valid (pre-configured client, no DCR)."""
-        r = self._run("--mcp", "https://example.com/mcp", "--oauth-client-id", "my-id", "--list")
-        # Flag combination itself must not produce a validation error
+        r = self._run("--mcp", mcp_http_server, "--oauth-client-id", "my-id", "--list")
+        assert r.returncode == 0, r.stderr
         assert "--oauth-client-secret" not in r.stderr
 
     def test_client_secret_without_id_errors(self):
@@ -783,15 +896,14 @@ class TestOAuthCLIValidation:
         assert r.returncode != 0
         assert "not supported with --mcp-stdio" in r.stderr
 
-    def test_oauth_with_spec_accepted(self):
-        """--oauth with --spec should not error on the flag itself (may fail on connection)."""
-        r = self._run("--spec", "https://example.com/openapi.json", "--oauth", "--list")
-        # Should NOT contain the old MCP-only error
+    def test_oauth_with_spec_accepted(self, petstore_server):
+        r = self._run("--spec", f"{petstore_server}/openapi.json", "--oauth", "--list")
+        assert r.returncode == 0, r.stderr
         assert "not supported" not in r.stderr
 
-    def test_oauth_with_graphql_accepted(self):
-        """--oauth with --graphql should not error on the flag itself (may fail on connection)."""
-        r = self._run("--graphql", "https://example.com/graphql", "--oauth", "--list")
+    def test_oauth_with_graphql_accepted(self, graphql_server):
+        r = self._run("--graphql", graphql_server, "--oauth", "--list")
+        assert r.returncode == 0, r.stderr
         assert "not supported" not in r.stderr
 
     def test_oauth_with_local_spec_needs_base_url(self):
@@ -810,19 +922,18 @@ class TestOAuthCLIValidation:
         assert "--oauth-flow" in r.stdout
         assert "--oauth-manual-callback" in r.stdout
 
-    def test_env_secret_in_client_id(self):
+    def test_env_secret_in_client_id(self, mcp_http_server):
         """--oauth-client-id env:VAR should resolve from environment."""
         env = {**os.environ, "MCP2CLI_TEST_ID": "resolved-id"}
         cmd = [
             sys.executable, "-m", "mcp2cli",
-            "--mcp", "https://example.com/mcp",
+            "--mcp", mcp_http_server,
             "--oauth-client-id", "env:MCP2CLI_TEST_ID",
             "--oauth-client-secret", "literal-secret",
             "--list",
         ]
-        # Will fail to connect but should not error on secret resolution
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, env=env)
-        # Should NOT contain "environment variable" error
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10, env=env)
+        assert r.returncode == 0, r.stderr
         assert "environment variable" not in r.stderr
 
     def test_env_secret_missing_var_errors(self):

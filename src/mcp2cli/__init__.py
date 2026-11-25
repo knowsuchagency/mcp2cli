@@ -500,6 +500,7 @@ def _toon_encode(json_str: str) -> str | None:
             input=json_str,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=10,
         )
         if result.returncode == 0:
@@ -803,11 +804,26 @@ def _build_http_headers(auth_headers: list[tuple[str, str]], multipart: bool = F
     return headers
 
 
+def _http_request(method: str, url, *, timeout: float, oauth_provider=None, **kwargs):
+    if oauth_provider is None:
+        with httpx.Client(timeout=timeout) as client:
+            return client.request(method, str(url), **kwargs)
+
+    async def request():
+        # OAuth is async-only; the SDK factory also selects httpx vs httpx2.
+        from mcp.shared._httpx_utils import create_mcp_http_client
+
+        async with create_mcp_http_client(auth=oauth_provider) as client:
+            return await client.request(
+                method, str(url), timeout=timeout, follow_redirects=False, **kwargs,
+            )
+
+    return anyio.run(request)
+
+
 def _handle_http_error(resp) -> None:
     """Print error and exit(1) on non-2xx HTTP response."""
-    try:
-        resp.raise_for_status()
-    except httpx.HTTPStatusError:
+    if not 200 <= resp.status_code < 300:
         print(f"Error {resp.status_code}: {resp.text}", file=sys.stderr)
         sys.exit(1)
 
@@ -1578,15 +1594,24 @@ def build_oauth_provider(
         _CallbackHandler.error = None
         _CallbackHandler.done = threading.Event()
 
-        if callback_host == "::1":
-            import socket as _socket
+        try:
+            if callback_host == "::1":
+                import socket as _socket
 
-            class _IPv6HTTPServer(HTTPServer):
-                address_family = _socket.AF_INET6
+                class _IPv6HTTPServer(HTTPServer):
+                    address_family = _socket.AF_INET6
 
-            server = _IPv6HTTPServer((callback_host, port), _CallbackHandler)
-        else:
-            server = HTTPServer((callback_host, port), _CallbackHandler)
+                server = _IPv6HTTPServer((callback_host, port), _CallbackHandler)
+            else:
+                server = HTTPServer((callback_host, port), _CallbackHandler)
+        except OSError as exc:
+            print(
+                f"Error: cannot listen on {callback_host}:{port} for the OAuth "
+                f"callback ({exc}). Pick a free port with --oauth-redirect-uri, "
+                "or use --oauth-manual-callback on a headless host.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         async def redirect_handler(auth_url: str) -> None:
             print("Opening browser for authorization...", file=sys.stderr)
@@ -1752,12 +1777,22 @@ def load_openapi_spec(
                 return cached
 
         headers = dict(auth_headers)
-        with httpx.Client(timeout=30, auth=oauth_provider) as client:
-            resp = client.get(source, headers=headers)
-            resp.raise_for_status()
-            raw = resp.text
+        resp = _http_request(
+            "GET", source, timeout=30, oauth_provider=oauth_provider, headers=headers,
+        )
+        resp.raise_for_status()
+        raw = resp.text
     else:
-        raw = Path(source).read_text()
+        # Accept an editor-added BOM without depending on the system locale.
+        try:
+            raw = Path(source).read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            print(
+                f"Error: spec file {source!r} is not valid UTF-8. "
+                "Re-save it as UTF-8 and try again.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     # Parse JSON or YAML
     try:
@@ -2293,14 +2328,12 @@ def load_graphql_schema(
 
     headers = dict(auth_headers)
     headers.setdefault("Content-Type", "application/json")
-    with httpx.Client(timeout=30, auth=oauth_provider) as client:
-        resp = client.post(
-            url,
-            headers=headers,
-            json={"query": GRAPHQL_INTROSPECTION_QUERY},
-        )
-        resp.raise_for_status()
-        result = resp.json()
+    resp = _http_request(
+        "POST", url, timeout=30, oauth_provider=oauth_provider,
+        headers=headers, json={"query": GRAPHQL_INTROSPECTION_QUERY},
+    )
+    resp.raise_for_status()
+    result = resp.json()
 
     if "errors" in result and not result.get("data"):
         msgs = "; ".join(e.get("message", "") for e in result["errors"])
@@ -2586,13 +2619,11 @@ def execute_graphql(
 
     headers = _build_http_headers(auth_headers)
 
-    with httpx.Client(timeout=60, auth=oauth_provider) as client:
-        resp = client.post(
-            url,
-            headers=headers,
-            json={"query": document, "variables": variables or None},
-        )
-        _handle_http_error(resp)
+    resp = _http_request(
+        "POST", url, timeout=60, oauth_provider=oauth_provider,
+        headers=headers, json={"query": document, "variables": variables or None},
+    )
+    _handle_http_error(resp)
 
     result = resp.json()
     if "errors" in result:
@@ -3490,30 +3521,17 @@ def execute_openapi(
     headers.update(extra_headers)
 
     try:
-        with httpx.Client(timeout=60, auth=oauth_provider) as client:
-            if files is not None:
-                resp = client.request(
-                    (cmd.method or "get").upper(),
-                    url,
-                    headers=headers,
-                    data=body,
-                    files=files,
-                )
-            elif cmd.content_type == "multipart/form-data":
-                resp = client.request(
-                    (cmd.method or "get").upper(),
-                    url,
-                    headers=headers,
-                    data=body,
-                )
-            else:
-                resp = client.request(
-                    (cmd.method or "get").upper(),
-                    url,
-                    headers=headers,
-                    json=body,
-                )
-            _handle_http_error(resp)
+        if files is not None:
+            payload = {"data": body, "files": files}
+        elif cmd.content_type == "multipart/form-data":
+            payload = {"data": body}
+        else:
+            payload = {"json": body}
+        resp = _http_request(
+            (cmd.method or "get").upper(), url, timeout=60,
+            oauth_provider=oauth_provider, headers=headers, **payload,
+        )
+        _handle_http_error(resp)
     finally:
         if files:
             for _, file_tuple in files.items():

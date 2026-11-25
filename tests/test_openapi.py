@@ -56,6 +56,32 @@ class TestLoadSpec:
         params = spec["paths"]["/pets"]["get"]["parameters"]
         assert params[0]["name"] == "limit"
 
+    @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+    @pytest.mark.parametrize("file_format", ["json", "yaml"])
+    def test_non_ascii_utf8_file_is_read_as_utf8(self, tmp_path, encoding, file_format):
+        expected = {
+            "openapi": "3.0.0",
+            "info": {"title": "测试 — café", "version": "1"},
+            "paths": {},
+        }
+        if file_format == "json":
+            raw = json.dumps(expected, ensure_ascii=False)
+        else:
+            import yaml
+
+            raw = yaml.safe_dump(expected, allow_unicode=True)
+        p = tmp_path / f"unicode.{file_format}"
+        p.write_text(raw, encoding=encoding)
+        assert load_openapi_spec(str(p), [], None, 3600, False) == expected
+
+    def test_invalid_utf8_reports_clear_error(self, tmp_path, capsys):
+        p = tmp_path / "invalid.json"
+        p.write_bytes(b'{"paths": {}, "title": "\xff"}')
+        with pytest.raises(SystemExit) as excinfo:
+            load_openapi_spec(str(p), [], None, 3600, False)
+        assert excinfo.value.code == 1
+        assert "not valid UTF-8" in capsys.readouterr().err
+
 
 class TestBuildArgparse:
     def test_subcommands_created(self, petstore_spec):
@@ -127,7 +153,7 @@ class TestExecuteOpenAPI:
             f"{petstore_server}/api/v1",
             *args,
         ]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=15)
 
     def test_list_commands(self, petstore_server):
         r = self._run(petstore_server, "--list")
@@ -186,7 +212,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input='{"name": "Snowball", "tag": "rabbit"}',
             timeout=15,
         )
@@ -211,7 +237,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input='{"name": "Snowball"}',
             timeout=15,
         )
@@ -235,7 +261,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             input='{"name": "Snowball",',
             timeout=15,
         )
@@ -268,7 +294,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--version"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
         )
         assert r.returncode == 0
@@ -278,7 +304,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
         )
         assert r.returncode != 0
@@ -288,7 +314,7 @@ class TestExecuteOpenAPI:
         r = subprocess.run(
             [sys.executable, "-m", "mcp2cli", "--spec", "x", "--mcp", "y", "--list"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8",
             timeout=10,
         )
         assert r.returncode != 0
@@ -914,7 +940,7 @@ class TestStrictBodySchemaOnTheWire:
                 "--tenant-id", "acme", "--region", "eu",
                 "--x-trace", "t-1", "--name", "widget", "--qty", "3",
             ),
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, encoding="utf-8", timeout=15,
         )
         assert r.returncode == 0, r.stderr
         echo = json.loads(r.stdout)
@@ -930,7 +956,7 @@ class TestStrictBodySchemaOnTheWire:
                 "--tenant-id", "acme", "--region", "eu",
                 "--x-trace", "t-2", "--stdin",
             ),
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8",
             input='{"name": "from-stdin"}', timeout=15,
         )
         assert r.returncode == 0, r.stderr
@@ -945,7 +971,7 @@ class TestStrictBodySchemaOnTheWire:
         for flag in ("--no-archived", "--archived"):
             r = subprocess.run(
                 self._cmd(strict_items_server, *base, flag),
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, encoding="utf-8", timeout=15,
             )
             assert r.returncode == 0, r.stderr
             sent[flag] = json.loads(r.stdout)["query"]

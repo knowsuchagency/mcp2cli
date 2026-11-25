@@ -257,7 +257,7 @@ def _run(*args, config_dir=None, cache_dir=None, cwd=None):
     return subprocess.run(
         cmd,
         capture_output=True,
-        text=True,
+        text=True, encoding="utf-8",
         timeout=30,
         env=env,
         cwd=str(cwd) if cwd else None,
