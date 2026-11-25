@@ -497,15 +497,13 @@ def _toon_encode(json_str: str) -> str | None:
     try:
         result = subprocess.run(
             cmd,
-            input=json_str,
+            input=json_str.encode("utf-8"),
             capture_output=True,
-            text=True,
-            encoding="utf-8",
             timeout=10,
         )
         if result.returncode == 0:
-            return result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+            return result.stdout.decode("utf-8")
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeError):
         pass
     return None
 
